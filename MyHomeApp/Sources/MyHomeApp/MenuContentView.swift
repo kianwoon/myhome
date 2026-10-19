@@ -30,7 +30,14 @@ struct MenuContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(store.devices) { device in
+                        // ON devices first, then alphabetical — a glance at
+                        // the panel shows what is running without hunting.
+                        ForEach(store.devices.sorted {
+                            let l = store.state(for: $0).power ?? false
+                            let r = store.state(for: $1).power ?? false
+                            if l != r { return l && !r }
+                            return $0.name.lowercased() < $1.name.lowercased()
+                        }) { device in
                             DeviceRow(device: device)
                         }
                     }
