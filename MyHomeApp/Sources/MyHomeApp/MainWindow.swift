@@ -45,7 +45,7 @@ enum DeviceGroup: String, CaseIterable, Identifiable {
 
 struct DashboardView: View {
     @EnvironmentObject private var store: DeviceStore
-    @State private var group: DeviceGroup = .fans
+    @State private var group: DeviceGroup = DeviceGroup.allCases.first { ProcessInfo.processInfo.environment["MYHOME_GROUP"] == $0.title.lowercased() } ?? .fans
     @State private var selectedID: String?
     // Which category's button started the current rescan (drives the spinner).
     // Local view state only; the working flag itself stays store.isWorking.

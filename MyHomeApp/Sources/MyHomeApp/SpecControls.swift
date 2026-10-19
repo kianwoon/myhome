@@ -86,7 +86,19 @@ private struct CapabilityRow: View {
             }
 
         case .integer:
-            if let lower = capability.minValue, let upper = capability.maxValue {
+            // General rule: a stepped SwiftUI Slider becomes an AppKit slider
+            // with (max-min)/step TICK MARKS, and AppKit rebuilds every tick
+            // rect on each layout (NSSliderTickMarks._rebuildTickMarkRectCache).
+            // Upstream declares dps like countdown_1 (0-86400s, step 1): a
+            // stepped slider there is 86,400 tick rects per card per render —
+            // the 100% CPU hang. So: countdown/timer dps are not sliders at
+            // all, and any range whose tick count would exceed 100 renders
+            // step-free (continuous, zero tick marks).
+            if capability.code.lowercased().contains("countdown") {
+                EmptyView()
+            } else if let lower = capability.minValue, let upper = capability.maxValue {
+                let ticks = (upper - lower) / (capability.step ?? 1)
+                if ticks > 100 {
                 HStack(spacing: 8) {
                     Text(capability.displayName)
                         .font(.caption)
@@ -116,6 +128,29 @@ private struct CapabilityRow: View {
                 .onChange(of: state.dps[capability.dpId]?.doubleValue ?? lower) { newValue in
                     if !editingNumber {
                         numberValue = newValue
+                    }
+                }
+                } else {
+                    // Continuous slider: no step, therefore no tick marks.
+                    HStack(spacing: 8) {
+                        Text(capability.displayName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Slider(value: $numberValue,
+                               in: lower...max(lower, upper)) { editing in
+                            editingNumber = editing
+                            if !editing {
+                                Task { await store.setDps(device, [capability.dpId: numberValue]) }
+                            }
+                        }
+                        .controlSize(.mini)
+                        Text(numberLabel)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 46, alignment: .trailing)
+                    }
+                    .onAppear {
+                        numberValue = state.dps[capability.dpId]?.doubleValue ?? lower
                     }
                 }
             }
