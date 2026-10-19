@@ -1,0 +1,118 @@
+// baseline-guard:allow new source file, no prior baseline
+import Foundation
+
+public struct Device: Identifiable, Decodable, Hashable {
+    public let id: String
+    public let name: String
+    public let ip: String
+    public let version: String?
+    public let category: String
+    public let online: Bool
+
+    public var hasAddress: Bool { !ip.isEmpty }
+
+    public init(
+        id: String,
+        name: String,
+        ip: String,
+        version: String?,
+        category: String,
+        online: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.ip = ip
+        self.version = version
+        self.category = category
+        self.online = online
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, ip, version, category, online
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Device"
+        ip = try container.decodeIfPresent(String.self, forKey: .ip) ?? ""
+        category = try container.decodeIfPresent(String.self, forKey: .category) ?? ""
+        online = try container.decodeIfPresent(Bool.self, forKey: .online) ?? false
+
+        if let string = try? container.decodeIfPresent(String.self, forKey: .version) {
+            version = string
+        } else if let number = try? container.decodeIfPresent(Double.self, forKey: .version) {
+            version = String(format: "%g", number)
+        } else {
+            version = nil
+        }
+    }
+}
+
+/// Icon and grouping decision for a device, driven by category first and
+/// name keywords as the fallback.
+public enum DeviceKind: String, Equatable {
+    case fan, curtain, light, plug, climate, purifier, kettle, unknown
+
+    public var iconName: String {
+        switch self {
+        case .fan: return "fanblades.fill"
+        case .curtain: return "curtains.closed"
+        case .light: return "lightbulb.fill"
+        case .plug: return "powerplug.fill"
+        case .climate: return "thermometer.medium"
+        case .purifier: return "aqi.medium"
+        case .kettle: return "cup.and.saucer.fill"
+        case .unknown: return "dot.radiowaves.left.and.right"
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .fan: return "Fan"
+        case .curtain: return "Curtain"
+        case .light: return "Light"
+        case .plug: return "Power"
+        case .climate: return "Climate"
+        case .purifier: return "Purifier"
+        case .kettle: return "Kitchen"
+        case .unknown: return "Device"
+        }
+    }
+
+    public static func classify(category: String, name: String) -> DeviceKind {
+        switch category.lowercased() {
+        case "cl":
+            return .curtain
+        case "dj", "xdd":
+            return .light
+        case "fs", "fsd":
+            return .fan
+        case "wsdcg", "cq":
+            return .climate
+        case "cz", "kg":
+            return .plug
+        default:
+            break
+        }
+
+        let lowered = name.lowercased()
+        if lowered.contains("curtain") { return .curtain }
+        if lowered.contains("fan") { return .fan }
+        if lowered.contains("light") || lowered.contains("lamp") { return .light }
+        if lowered.contains("purifier") || lowered.contains("filter") { return .purifier }
+        if lowered.contains("humidity") || lowered.contains("climate") || lowered.contains("thermostat") { return .climate }
+        if lowered.contains("heater") || lowered.contains("cooker") || lowered.contains("rice") { return .kettle }
+        if lowered.contains("water") || lowered.contains("computer") || lowered.contains("internet")
+            || lowered.contains("power") || lowered.contains("plug") {
+            return .plug
+        }
+        return .unknown
+    }
+}
+
+extension Device {
+    public var kind: DeviceKind {
+        DeviceKind.classify(category: category, name: name)
+    }
+}
