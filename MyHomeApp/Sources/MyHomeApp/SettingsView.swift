@@ -112,7 +112,6 @@ private struct CloudSettingsView: View {
             maskedSecret = config["apiSecretMasked"] as? String ?? ""
             let region = config["apiRegion"] as? String ?? ""
             if !region.isEmpty { apiRegion = region }
-            status = .idle
         } catch {
             status = .failure(error.localizedDescription)
         }
