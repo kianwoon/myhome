@@ -51,6 +51,8 @@ public final class DeviceStore: ObservableObject {
     private var pollObservers = 0
     private var cyclesSinceCloudSync = 0
     private var isCloudSyncing = false
+    private var specsFetched = false
+    private var specsFetching = false
 
     public init(bridge: any BridgeSending = BridgeClient.shared) {
         self.bridge = bridge
@@ -71,7 +73,7 @@ public final class DeviceStore: ObservableObject {
     }
 
     public func state(for device: Device) -> DeviceState {
-        DeviceState(dps: dpsById[device.id] ?? [:])
+        DeviceState(dps: dpsById[device.id] ?? [:], capabilities: device.capabilities)
     }
 
     /// nil until a fetch (or confirmed write) has reported dps 1.
@@ -108,6 +110,7 @@ public final class DeviceStore: ObservableObject {
             // Deliberately no isOn default: unknown power stays indeterminate
             // until status arrives.
             errorText = nil
+            requestSpecsIfNeeded()
         } catch {
             errorText = error.localizedDescription
         }
@@ -215,6 +218,29 @@ public final class DeviceStore: ObservableObject {
     public func loadAllStatuses() async {
         for device in devices where device.hasAddress {
             await loadStatus(for: device)
+        }
+    }
+
+    /// Fetch upstream capability metadata once; the bridge caches per device.
+    private func requestSpecsIfNeeded() {
+        guard !specsFetched, !specsFetching else { return }
+        guard devices.contains(where: { $0.spec == nil }) else {
+            specsFetched = true
+            return
+        }
+        specsFetching = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let reply = try await self.bridge.request(["cmd": "specs"], timeout: 60)
+                if reply["ok"] as? Bool == true {
+                    self.specsFetched = true
+                    await self.refresh()
+                }
+            } catch {
+                // Leave specsFetching false so a later refresh can retry.
+            }
+            self.specsFetching = false
         }
     }
 

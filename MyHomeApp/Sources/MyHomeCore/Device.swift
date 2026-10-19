@@ -8,6 +8,7 @@ public struct Device: Identifiable, Decodable, Hashable {
     public let version: String?
     public let category: String
     public let online: Bool
+    public let spec: [String: DPDeclaration]?
 
     public var hasAddress: Bool { !ip.isEmpty }
 
@@ -17,7 +18,8 @@ public struct Device: Identifiable, Decodable, Hashable {
         ip: String,
         version: String?,
         category: String,
-        online: Bool
+        online: Bool,
+        spec: [String: DPDeclaration]? = nil
     ) {
         self.id = id
         self.name = name
@@ -25,10 +27,11 @@ public struct Device: Identifiable, Decodable, Hashable {
         self.version = version
         self.category = category
         self.online = online
+        self.spec = spec
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, ip, version, category, online
+        case id, name, ip, version, category, online, spec
     }
 
     public init(from decoder: Decoder) throws {
@@ -38,6 +41,7 @@ public struct Device: Identifiable, Decodable, Hashable {
         ip = try container.decodeIfPresent(String.self, forKey: .ip) ?? ""
         category = try container.decodeIfPresent(String.self, forKey: .category) ?? ""
         online = try container.decodeIfPresent(Bool.self, forKey: .online) ?? false
+        spec = try container.decodeIfPresent([String: DPDeclaration].self, forKey: .spec)
 
         if let string = try? container.decodeIfPresent(String.self, forKey: .version) {
             version = string

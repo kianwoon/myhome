@@ -12,6 +12,8 @@ Requests:
     {"cmd":"set","id":"<device-id>","dps":{...}}
     {"cmd":"rescan"}
     {"cmd":"cloudsync"}
+    {"cmd":"specs"}
+    {"cmd":"specs","id":"<device-id>"}
 """
 
 import json
@@ -177,14 +179,7 @@ def handle_cloudsync():
     deleted. Credentials are read from tinytuya.json and never echoed.
     """
     try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as handle:
-            credentials = json.load(handle)
-        cloud = tinytuya.Cloud(
-            apiRegion=credentials.get("apiRegion"),
-            apiKey=credentials.get("apiKey"),
-            apiSecret=credentials.get("apiSecret"),
-            apiDeviceID=credentials.get("apiDeviceID"),
-        )
+        cloud = make_cloud()
         result = cloud.getdevices(False)
     except Exception as exc:
         # Never include token/secret material in the reply.
@@ -241,6 +236,97 @@ def handle_cloudsync():
     }
 
 
+def make_cloud():
+    """Build a Cloud client from tinytuya.json. Secrets never leave this path."""
+    with open(CREDENTIALS_PATH, "r", encoding="utf-8") as handle:
+        credentials = json.load(handle)
+    return tinytuya.Cloud(
+        apiRegion=credentials.get("apiRegion"),
+        apiKey=credentials.get("apiKey"),
+        apiSecret=credentials.get("apiSecret"),
+        apiDeviceID=credentials.get("apiDeviceID"),
+    )
+
+
+def fetch_spec(cloud, device_id):
+    """Fetch one device's declared functions and normalise them by dp id."""
+    url = "/v1.1/devices/%s/specifications" % device_id
+    response = cloud.cloudrequest(url, "GET")
+    body = response.get("result", response) if isinstance(response, dict) else None
+    functions = body.get("functions") if isinstance(body, dict) else None
+    if not isinstance(functions, list):
+        return None
+
+    spec = {}
+    for function in functions:
+        if not isinstance(function, dict):
+            continue
+        dp_id = function.get("dp_id")
+        if dp_id is None:
+            continue
+        values = function.get("values", "{}")
+        if isinstance(values, str):
+            try:
+                values = json.loads(values)
+            except ValueError:
+                pass
+        spec[str(dp_id)] = {
+            "code": function.get("code", ""),
+            "type": function.get("type", ""),
+            "values": values,
+        }
+    return spec
+
+
+def handle_specs(request):
+    """Fetch upstream capability metadata for one device or all (cached bulk).
+
+    General rule: controls are derived from upstream capability metadata.
+    Bulk calls skip devices that already carry a "spec"; a single-id call
+    refreshes on demand.
+    """
+    device_id = request.get("id")
+    if device_id is not None and not isinstance(device_id, str):
+        return {"ok": False, "error": "bad device id"}
+
+    if device_id is not None:
+        targets = [config for config in _devices if config.get("id") == device_id]
+        if not targets:
+            return {"ok": False, "error": "unknown device id"}
+    else:
+        targets = list(_devices)
+
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+
+    updated = 0
+    failures = 0
+    for config in targets:
+        if device_id is None and config.get("spec") and not request.get("refresh"):
+            continue
+        try:
+            spec = fetch_spec(cloud, config.get("id"))
+        except Exception:
+            failures += 1
+            continue
+        if spec:
+            config["spec"] = spec
+            updated += 1
+        else:
+            failures += 1
+
+    if updated:
+        with open(DEVICES_PATH, "w", encoding="utf-8") as handle:
+            json.dump(_devices, handle, indent=2)
+            handle.write("\n")
+
+    if updated == 0 and failures > 0:
+        return {"ok": False, "error": "spec fetch failed"}
+    return {"ok": True, "updated": updated}
+
+
 def dispatch(request):
     cmd = request.get("cmd")
     if cmd == "ping":
@@ -261,6 +347,8 @@ def dispatch(request):
         return handle_rescan()
     if cmd == "cloudsync":
         return handle_cloudsync()
+    if cmd == "specs":
+        return handle_specs(request)
     return {"ok": False, "error": "unknown command"}
 
 

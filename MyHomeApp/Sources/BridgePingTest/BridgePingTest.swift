@@ -33,6 +33,11 @@ struct BridgePingTest {
             return
         }
 
+        if mode == "specs" {
+            proveSpecControls()
+            return
+        }
+
         if mode == "status" {
             let id = arguments.count > 2 ? arguments[2] : "bf3cf132f77b8ca85dapgm"
             await fetchStatus(id: id)
@@ -194,6 +199,46 @@ struct BridgePingTest {
             exit(0)
         } catch {
             print("CURTAIN_KEYS_ERROR \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+
+    /// Real Study Fan spec fixture: declared dp15 light Boolean must yield a
+    /// card control, while numeric gear dp3 stays undeclared (fallback path).
+    private static func proveSpecControls() {
+        let fixture = """
+        {"id":"bfaded7e0f0815c59eto2l","name":"Study Fan","ip":"192.168.4.33",
+         "version":"3.4","category":"fs","online":true,
+         "spec":{
+           "1":{"code":"switch","type":"Boolean","values":{}},
+           "2":{"code":"mode","type":"Enum","values":{"range":["nature","sleep","fresh","smart"]}},
+           "8":{"code":"fan_direction","type":"Enum","values":{"range":["forward","reverse"]}},
+           "15":{"code":"light","type":"Boolean","values":{}}
+         }}
+        """
+        do {
+            let device = try JSONDecoder().decode(Device.self, from: Data(fixture.utf8))
+            let state = DeviceState(dps: ["1": .bool(true)], capabilities: device.capabilities)
+            let caps = state.capabilities
+                .map { "\($0.dpId):\($0.code):\($0.type)" }
+                .joined(separator: " ")
+            let controls = state.controlCapabilities
+                .map { "\($0.dpId):\($0.code):\($0.type)" }
+                .joined(separator: " ")
+            let hasLight = state.capabilities.contains { capability in
+                if case .boolean = capability.kind {
+                    return capability.dpId == "15" && capability.code == "light"
+                }
+                return false
+            }
+            print("CAPS \(caps)")
+            print("CONTROLS \(controls)")
+            print("DP15_BOOLEAN_LIGHT \(hasLight)")
+            print("DP3_UNDECLARED \(!state.isDeclared("3"))")
+            print("SPEC_CONTROLS_OK")
+            exit(hasLight ? 0 : 1)
+        } catch {
+            print("SPEC_CONTROLS_ERROR \(error)")
             exit(1)
         }
     }

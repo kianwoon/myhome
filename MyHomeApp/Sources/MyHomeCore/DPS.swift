@@ -101,6 +101,11 @@ public enum DPSValue: Codable, Hashable, CustomStringConvertible {
         }
     }
 
+    public var arrayValue: [DPSValue]? {
+        if case .array(let values) = self { return values }
+        return nil
+    }
+
     public var description: String {
         switch self {
         case .bool(let value):
@@ -138,9 +143,22 @@ public struct DeviceState {
     public static let stringFanSpeedMax = 3
 
     public let dps: [String: DPSValue]
+    public let capabilities: [Capability]
 
-    public init(dps: [String: DPSValue]) {
+    public init(dps: [String: DPSValue], capabilities: [Capability] = []) {
         self.dps = dps
+        self.capabilities = capabilities
+    }
+
+    /// Controls rendered from the spec. dp 1 is the card's master power
+    /// toggle, so it is not repeated here.
+    public var controlCapabilities: [Capability] {
+        capabilities.filter { $0.isInteractive && $0.dpId != "1" }
+    }
+
+    public func isDeclared(_ key: String?) -> Bool {
+        guard let key = key else { return false }
+        return capabilities.contains { $0.dpId == key }
     }
 
     public func value(_ key: String) -> DPSValue? {

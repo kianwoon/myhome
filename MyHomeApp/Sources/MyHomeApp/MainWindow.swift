@@ -193,6 +193,9 @@ struct DeviceCard: View {
                     .opacity(power == nil ? 0.5 : 1)
             }
 
+            SpecControlsView(device: device, state: state)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             Divider()
 
             RichControlView(device: device, state: state)
@@ -247,36 +250,40 @@ struct FanControlView: View {
     let state: DeviceState
 
     private var speedKey: String { state.fanSpeedKey ?? "2" }
+    private var showSpeed: Bool { !state.isDeclared(state.fanSpeedKey) }
+    private var showOscillation: Bool { !state.isDeclared(state.oscillationKey) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Speed")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                ForEach(1...state.fanSpeedMax, id: \.self) { level in
-                    Button {
-                        Task {
-                            await store.setDps(
-                                device,
-                                [speedKey: level],
-                                optimistic: [speedKey: .number(Double(level))]
-                            )
+            if showSpeed {
+                HStack(spacing: 8) {
+                    Text("Speed")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    ForEach(1...state.fanSpeedMax, id: \.self) { level in
+                        Button {
+                            Task {
+                                await store.setDps(
+                                    device,
+                                    [speedKey: level],
+                                    optimistic: [speedKey: .number(Double(level))]
+                                )
+                            }
+                        } label: {
+                            Circle()
+                                .fill(level <= state.fanSpeed
+                                      ? Color.accentColor
+                                      : Color.secondary.opacity(0.25))
+                                .frame(width: 10, height: 10)
                         }
-                    } label: {
-                        Circle()
-                            .fill(level <= state.fanSpeed
-                                  ? Color.accentColor
-                                  : Color.secondary.opacity(0.25))
-                            .frame(width: 10, height: 10)
+                        .buttonStyle(.plain)
+                        .help("Speed \(level)")
                     }
-                    .buttonStyle(.plain)
-                    .help("Speed \(level)")
                 }
             }
 
-            if let oscKey = state.oscillationKey {
+            if showOscillation, let oscKey = state.oscillationKey {
                 Toggle(isOn: Binding(
                     get: { store.state(for: device).oscillation },
                     set: { newValue in
@@ -306,39 +313,45 @@ struct CurtainControlView: View {
 
     @State private var position: Double = 0
     @State private var isDragging = false
+    private var showPosition: Bool { !state.isDeclared(state.curtainPositionKey) }
+    private var showActions: Bool { !state.isDeclared(state.curtainActionKey) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Position")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Slider(value: $position, in: 0...100, onEditingChanged: { editing in
-                    isDragging = editing
-                    if !editing, let positionKey = state.curtainPositionKey {
-                        Task {
-                            await store.setDps(device, [positionKey: Int(position.rounded())])
+            if showPosition {
+                HStack(spacing: 8) {
+                    Text("Position")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $position, in: 0...100, onEditingChanged: { editing in
+                        isDragging = editing
+                        if !editing, let positionKey = state.curtainPositionKey {
+                            Task {
+                                await store.setDps(device, [positionKey: Int(position.rounded())])
+                            }
                         }
-                    }
-                })
-                .controlSize(.mini)
-                .disabled(state.curtainPositionKey == nil)
-                Text("\(Int(position.rounded())) %")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
+                    })
+                    .controlSize(.mini)
+                    .disabled(state.curtainPositionKey == nil)
+                    Text("\(Int(position.rounded())) %")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
             }
 
-            if let actionKey = state.curtainActionKey {
-                HStack(spacing: 6) {
-                    actionButton("Open", icon: "arrow.up.to.line", value: "open", key: actionKey)
-                    actionButton("Stop", icon: "stop.fill", value: "stop", key: actionKey)
-                    actionButton("Close", icon: "arrow.down.to.line", value: "close", key: actionKey)
+            if showActions {
+                if let actionKey = state.curtainActionKey {
+                    HStack(spacing: 6) {
+                        actionButton("Open", icon: "arrow.up.to.line", value: "open", key: actionKey)
+                        actionButton("Stop", icon: "stop.fill", value: "stop", key: actionKey)
+                        actionButton("Close", icon: "arrow.down.to.line", value: "close", key: actionKey)
+                    }
+                } else {
+                    Text("Action control unavailable")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-            } else {
-                Text("Action control unavailable")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
         }
         .onAppear { position = state.position ?? 0 }
@@ -376,29 +389,33 @@ struct LightControlView: View {
     @State private var colorTemp: Double = 500
     @State private var isDraggingBrightness = false
     @State private var isDraggingTemp = false
+    private var showBrightness: Bool { !state.isDeclared("2") }
+    private var showColorTemp: Bool { !state.isDeclared(state.colorTempKey) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "sun.max")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Slider(value: $brightness, in: 10...1000, onEditingChanged: { editing in
-                    isDraggingBrightness = editing
-                    if !editing {
-                        Task {
-                            await store.setDps(device, ["2": Int(brightness.rounded())])
+            if showBrightness {
+                HStack(spacing: 8) {
+                    Image(systemName: "sun.max")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $brightness, in: 10...1000, onEditingChanged: { editing in
+                        isDraggingBrightness = editing
+                        if !editing {
+                            Task {
+                                await store.setDps(device, ["2": Int(brightness.rounded())])
+                            }
                         }
-                    }
-                })
-                .controlSize(.mini)
-                Text("\(Int(brightness.rounded()))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
+                    })
+                    .controlSize(.mini)
+                    Text("\(Int(brightness.rounded()))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
             }
 
-            if let tempKey = state.colorTempKey {
+            if showColorTemp, let tempKey = state.colorTempKey {
                 HStack(spacing: 8) {
                     Image(systemName: "thermometer.sun")
                         .font(.caption)

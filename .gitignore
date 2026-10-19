@@ -134,3 +134,9 @@ server/tinytuya
 # Local issue response archive
 issues/
 server/.beta_build
+
+# MyHome app build artifacts (generated)
+MyHomeApp/.build/
+MyHomeApp/MyHome.app/
+MyHomeApp/Icons/
+MyHomeApp/AppIcon.icns
