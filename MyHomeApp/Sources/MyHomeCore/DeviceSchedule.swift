@@ -10,6 +10,7 @@ public struct DeviceSchedule: Identifiable, Decodable, Hashable {
     public let time: String
     public let code: String
     public let value: Bool
+    public let action: String
     public let status: Int
     public let ours: Bool
 
@@ -17,7 +18,7 @@ public struct DeviceSchedule: Identifiable, Decodable, Hashable {
 
     public var id: String { "\(category)/\(groupId)" }
     public var isEnabled: Bool { status != 0 }
-    public var actionLabel: String { value ? "ON" : "OFF" }
+    public var actionLabel: String { action.isEmpty ? (value ? "ON" : "OFF") : action }
 
     /// Enabled day indexes, Monday-first.
     public var dayIndexes: [Int] {
@@ -26,10 +27,17 @@ public struct DeviceSchedule: Identifiable, Decodable, Hashable {
         }
     }
 
-    /// "Mon,Wed 08:30 ON" when the user left the name blank.
+    /// "Open · every day 08:30" when the user left the name blank.
     public var generatedName: String {
-        let days = dayIndexes.map { Self.dayNames[$0] }.joined(separator: ",")
-        return "\(days.isEmpty ? "Once" : days) \(time) \(actionLabel)"
+        let days: String
+        if dayIndexes.count == 7 {
+            days = "every day"
+        } else if dayIndexes.isEmpty {
+            days = "once"
+        } else {
+            days = dayIndexes.map { Self.dayNames[$0] }.joined(separator: ",")
+        }
+        return "\(actionLabel) · \(days) \(time)"
     }
 
     public var displayName: String {
@@ -38,7 +46,7 @@ public struct DeviceSchedule: Identifiable, Decodable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case groupId = "group_id"
-        case category, aliasName = "alias_name", loops, time, code, value, status, ours
+        case category, aliasName = "alias_name", loops, time, code, value, action, status, ours
     }
 
     public init(from decoder: Decoder) throws {
@@ -49,7 +57,15 @@ public struct DeviceSchedule: Identifiable, Decodable, Hashable {
         loops = (try? container.decode(String.self, forKey: .loops)) ?? ""
         time = (try? container.decode(String.self, forKey: .time)) ?? ""
         code = (try? container.decode(String.self, forKey: .code)) ?? ""
-        value = (try? container.decode(Bool.self, forKey: .value)) ?? false
+        if let boolValue = try? container.decode(Bool.self, forKey: .value) {
+            value = boolValue
+        } else if let intValue = try? container.decode(Int.self, forKey: .value) {
+            value = intValue != 0
+        } else {
+            value = false
+        }
+        action = (try? container.decode(String.self, forKey: .action))
+            ?? (value ? "ON" : "OFF")
         status = (try? container.decode(Int.self, forKey: .status)) ?? 0
         ours = (try? container.decode(Bool.self, forKey: .ours)) ?? false
     }

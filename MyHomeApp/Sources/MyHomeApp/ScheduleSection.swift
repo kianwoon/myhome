@@ -84,6 +84,19 @@ private struct ScheduleRow: View {
         )
     }
 
+    /// Enum actions keep their semantic color: open/continue/on run (green),
+    /// close/off are closed (secondary); unknown enum labels use accent.
+    private var actionColor: Color {
+        switch schedule.actionLabel.lowercased() {
+        case "open", "continue", "on":
+            return .green
+        case "close", "off":
+            return .secondary
+        default:
+            return .accentColor
+        }
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
@@ -118,11 +131,11 @@ private struct ScheduleRow: View {
 
             Text(schedule.actionLabel)
                 .font(.caption2.weight(.bold))
-                .foregroundStyle(schedule.value ? Color.green : Color.secondary)
+                .foregroundStyle(actionColor)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(
-                    (schedule.value ? Color.green : Color.secondary).opacity(0.12)
+                    actionColor.opacity(0.12)
                 ))
 
             Toggle("", isOn: enabledBinding)

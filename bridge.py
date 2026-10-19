@@ -864,13 +864,44 @@ def _system_timezone():
     return offset, timezone_id
 
 
-def _schedule_value(raw):
+# General rule: a schedule's action semantic follows the INSTRUCTION CODE's
+# type in the device spec — Boolean codes render ON/OFF from the bool value;
+# Enum control codes render the enum value as the action ("Open"/"Close"/
+# "Continue"), where open/continue mean "runs/open" and close means "closed".
+# Never coerce a string value to boolean. The raw value is carried through.
+_BOOLEAN_TRUE = ("1", "true", "on")
+_BOOLEAN_FALSE = ("0", "false", "off")
+_ACTION_LABELS = {"open": "Open", "close": "Close", "continue": "Continue"}
+
+
+def _schedule_action(raw, spec_entry=None):
+    """Derive a display action from the raw instruction value.
+
+    Value type is authoritative when the spec does not declare one: booleans
+    (and 0/1) are ON/OFF, strings are enum labels. A spec Boolean code forces
+    boolean semantics; a spec Enum code forces enum semantics.
+    """
+    declared = ""
+    if isinstance(spec_entry, dict):
+        declared = str(spec_entry.get("type") or "").lower()
     if isinstance(raw, bool):
-        return raw
-    return str(raw).lower() in ("1", "true", "on")
+        return "ON" if raw else "OFF"
+    if declared == "boolean":
+        return "ON" if str(raw).lower() in _BOOLEAN_TRUE else "OFF"
+    if isinstance(raw, (int, float)):
+        return "ON" if raw else "OFF"
+    text = str(raw).strip()
+    lowered = text.lower()
+    if declared != "enum" and lowered in _BOOLEAN_TRUE:
+        return "ON"
+    if declared != "enum" and lowered in _BOOLEAN_FALSE:
+        return "OFF"
+    if not text:
+        return ""
+    return _ACTION_LABELS.get(lowered, text[:1].upper() + text[1:])
 
 
-def _schedule_entry(category, group, timer=None):
+def _schedule_entry(category, group, timer=None, spec_by_code=None):
     """Flatten one category/group/timer defensively; never raises.
 
     Tuya returns both a nested shape (group.timers[]) and, historically, a
@@ -894,20 +925,24 @@ def _schedule_entry(category, group, timer=None):
     except (TypeError, ValueError):
         status = 1 if status else 0
     category = category if isinstance(category, str) else ""
+    code = str(function.get("code") or "")
+    raw_value = function.get("value")
+    spec_entry = spec_by_code.get(code) if isinstance(spec_by_code, dict) else None
     return {
         "group_id": str(group.get("group_id") or group.get("id") or ""),
         "category": category,
         "alias_name": str(timer.get("alias_name") or group.get("alias_name") or ""),
         "loops": str(timer.get("loops") or group.get("loops") or ""),
         "time": str(timer.get("time") or first.get("time") or group.get("time") or ""),
-        "code": str(function.get("code") or ""),
-        "value": _schedule_value(function.get("value")),
+        "code": code,
+        "value": raw_value,
+        "action": _schedule_action(raw_value, spec_entry),
         "status": status,
         "ours": category == OUR_SCHEDULE_CATEGORY,
     }
 
 
-def _flatten_schedules(result):
+def _flatten_schedules(result, spec_by_code=None):
     items = []
     if not isinstance(result, list):
         return items
@@ -930,11 +965,11 @@ def _flatten_schedules(result):
                 if isinstance(timers, list) and timers:
                     for timer in timers:
                         if isinstance(timer, dict):
-                            items.append(_schedule_entry(category, group, timer))
+                            items.append(_schedule_entry(category, group, timer, spec_by_code))
                 else:
-                    items.append(_schedule_entry(category, group))
+                    items.append(_schedule_entry(category, group, None, spec_by_code))
         elif entry.get("group_id") or entry.get("instruct") or entry.get("time"):
-            items.append(_schedule_entry(category, entry))
+            items.append(_schedule_entry(category, entry, None, spec_by_code))
     return items
 
 
@@ -961,7 +996,14 @@ def handle_schedules(request):
     result, error = _cloud_reply(cloud, "/v1.0/devices/%s/timers" % device_id)
     if error is not None:
         return {"ok": False, "error": error}
-    return {"ok": True, "schedules": _flatten_schedules(result)}
+    device = find_device(device_id) or {}
+    spec = device.get("spec")
+    spec_by_code = {}
+    if isinstance(spec, dict):
+        for entry in spec.values():
+            if isinstance(entry, dict) and isinstance(entry.get("code"), str):
+                spec_by_code[entry["code"]] = entry
+    return {"ok": True, "schedules": _flatten_schedules(result, spec_by_code)}
 
 
 def handle_schedadd(request):
