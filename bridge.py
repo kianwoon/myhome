@@ -11,6 +11,7 @@ Requests:
     {"cmd":"status","id":"<device-id>"}
     {"cmd":"set","id":"<device-id>","dps":{...}}
     {"cmd":"rescan"}
+    {"cmd":"cloudsync"}
 """
 
 import json
@@ -21,6 +22,7 @@ import tinytuya
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEVICES_PATH = os.path.join(BASE_DIR, "devices.json")
+CREDENTIALS_PATH = os.path.join(BASE_DIR, "tinytuya.json")
 
 SOCKET_TIMEOUT = 5
 
@@ -165,6 +167,80 @@ def handle_rescan():
     return {"ok": True, "merged": merged}
 
 
+def handle_cloudsync():
+    """Re-sync device identity from the Tuya cloud.
+
+    General rule: device IDENTITY (names, roster membership) is
+    cloud-authoritative data and must re-sync on a schedule, just as STATUS
+    is device-authoritative and re-syncs via polling. Local ip/version/key
+    fields always win and are preserved; cloud-absent ids are marked, never
+    deleted. Credentials are read from tinytuya.json and never echoed.
+    """
+    try:
+        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as handle:
+            credentials = json.load(handle)
+        cloud = tinytuya.Cloud(
+            apiRegion=credentials.get("apiRegion"),
+            apiKey=credentials.get("apiKey"),
+            apiSecret=credentials.get("apiSecret"),
+            apiDeviceID=credentials.get("apiDeviceID"),
+        )
+        result = cloud.getdevices(False)
+    except Exception as exc:
+        # Never include token/secret material in the reply.
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+
+    if not isinstance(result, list) or not result:
+        return {"ok": False, "error": "cloud sync failed: empty or unexpected response"}
+
+    by_id = {config.get("id"): config for config in _devices}
+    renamed = 0
+    added = 0
+    seen = set()
+
+    for cloud_device in result:
+        if not isinstance(cloud_device, dict):
+            continue
+        device_id = cloud_device.get("id")
+        if not device_id:
+            continue
+        seen.add(device_id)
+        name = cloud_device.get("name")
+        config = by_id.get(device_id)
+        if config is None:
+            _devices.append({
+                "id": device_id,
+                "name": name or device_id,
+                "ip": "",
+                "version": None,
+                "category": cloud_device.get("category", ""),
+                "key": "",
+                "cloud": True,
+            })
+            added += 1
+            continue
+
+        config["cloud"] = True
+        if name and config.get("name") != name:
+            config["name"] = name
+            renamed += 1
+
+    for config in _devices:
+        if config.get("id") not in seen:
+            config["cloud"] = False
+
+    with open(DEVICES_PATH, "w", encoding="utf-8") as handle:
+        json.dump(_devices, handle, indent=2)
+        handle.write("\n")
+
+    return {
+        "ok": True,
+        "renamed": renamed,
+        "added": added,
+        "total": len(_devices),
+    }
+
+
 def dispatch(request):
     cmd = request.get("cmd")
     if cmd == "ping":
@@ -183,6 +259,8 @@ def dispatch(request):
         return handle_set(device_id, request.get("dps"))
     if cmd == "rescan":
         return handle_rescan()
+    if cmd == "cloudsync":
+        return handle_cloudsync()
     return {"ok": False, "error": "unknown command"}
 
 

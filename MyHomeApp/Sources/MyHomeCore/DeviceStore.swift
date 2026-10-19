@@ -30,6 +30,13 @@ public final class DeviceStore: ObservableObject {
     public static let statusPollInterval: TimeInterval = 10
     public static let statusPollPacing: TimeInterval = 0.15
 
+    /// General rule: device IDENTITY (names, roster membership) is
+    /// cloud-authoritative and must re-sync on a schedule, just as STATUS is
+    /// device-authoritative and re-syncs via polling. Status staleness was
+    /// fixed by polling; identity staleness is fixed by periodic cloud sync.
+    /// One full sync every 30 status cycles (~5 minutes).
+    public static let cloudSyncInterval = 30
+
     @Published public private(set) var devices: [Device] = []
     @Published public private(set) var isOn: [String: Bool] = [:]
     @Published public private(set) var dpsById: [String: [String: DPSValue]] = [:]
@@ -42,6 +49,8 @@ public final class DeviceStore: ObservableObject {
     private var loadedStatus: Set<String> = []
     private var pollTask: Task<Void, Never>?
     private var pollObservers = 0
+    private var cyclesSinceCloudSync = 0
+    private var isCloudSyncing = false
 
     public init(bridge: any BridgeSending = BridgeClient.shared) {
         self.bridge = bridge
@@ -121,6 +130,8 @@ public final class DeviceStore: ObservableObject {
             errorText = error.localizedDescription
         }
         await refresh()
+        // Manual Rescan also forces an immediate cloud identity sync.
+        await cloudSync()
     }
 
     // MARK: - Polling
@@ -146,6 +157,11 @@ public final class DeviceStore: ObservableObject {
     private func pollLoop() async {
         while !Task.isCancelled {
             await pollCycle()
+            cyclesSinceCloudSync += 1
+            if cyclesSinceCloudSync >= Self.cloudSyncInterval {
+                cyclesSinceCloudSync = 0
+                await cloudSync()
+            }
             do {
                 try await Task.sleep(nanoseconds: UInt64(Self.statusPollInterval * 1_000_000_000))
             } catch {
@@ -199,6 +215,26 @@ public final class DeviceStore: ObservableObject {
     public func loadAllStatuses() async {
         for device in devices where device.hasAddress {
             await loadStatus(for: device)
+        }
+    }
+
+    /// Merges cloud-authoritative names/roster into devices.json (bridge side)
+    /// and re-reads the roster so new/renamed devices appear immediately.
+    public func cloudSync() async {
+        guard !isCloudSyncing else { return }
+        isCloudSyncing = true
+        defer { isCloudSyncing = false }
+
+        do {
+            let reply = try await bridge.request(["cmd": "cloudsync"], timeout: 20)
+            guard reply["ok"] as? Bool == true else {
+                errorText = reply["error"] as? String ?? "Cloud sync failed."
+                return
+            }
+            errorText = nil
+            await refresh()
+        } catch {
+            errorText = error.localizedDescription
         }
     }
 
