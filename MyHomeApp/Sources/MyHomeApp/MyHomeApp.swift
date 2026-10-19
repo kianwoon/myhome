@@ -16,14 +16,18 @@ final class UIState: ObservableObject {
     init() {
         // General rule: the MenuBarExtra panel's hosting view NEVER gets
         // onDisappear (it stays alive across open/close), so view-lifecycle
-        // hooks cannot reset panel state. The reliable signal is the panel
-        // WINDOW resigning key — i.e. the user clicked anywhere else. That is
-        // the moment the dashboard view must reset to the compact list.
+        // hooks cannot reset panel state. Reset only when the panel becomes
+        // fully NOT VISIBLE (user clicked elsewhere). Resign-key is unusable:
+        // the panel also re-keys transiently during the content swap when the
+        // user clicks "Open MyHome", which would cancel the dashboard they
+        // just requested.
         observer = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResignKeyNotification,
+            forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            guard let win = note.object as? NSWindow,
+                  !win.occlusionState.contains(.visible) else { return }
             Task { @MainActor in
                 self?.showDashboard = false
             }
