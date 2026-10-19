@@ -140,3 +140,7 @@ MyHomeApp/.build/
 MyHomeApp/MyHome.app/
 MyHomeApp/Icons/
 MyHomeApp/AppIcon.icns
+
+# local secrets — never commit
+client_secret_*.json
+.env.txt
