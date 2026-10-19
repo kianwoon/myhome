@@ -23,6 +23,16 @@ struct BridgePingTest {
             return
         }
 
+        if mode == "fanrange" {
+            proveFanRange()
+            return
+        }
+
+        if mode == "curtain" {
+            proveCurtainKeys()
+            return
+        }
+
         if mode == "status" {
             let id = arguments.count > 2 ? arguments[2] : "bf3cf132f77b8ca85dapgm"
             await fetchStatus(id: id)
@@ -141,6 +151,51 @@ struct BridgePingTest {
         print("SET_REQUESTS \(fake.requestCount) CONFIRMED_WINS=\(state.fanSpeed == 4)")
         print("SET_REPLY_APPLIED")
         exit(ok && state.fanSpeed == 4 && state.fanSpeedKey == "3" ? 0 : 1)
+    }
+
+    /// Speed capability: numeric-gear fans allow 1-6; string-mode fans 1-3.
+    private static func proveFanRange() {
+        let cases: [(String, [String: Any])] = [
+            ("study_fan", ["2": "custom", "3": 4]),
+            ("numeric_dp2", ["2": 3]),
+            ("strings_only", ["2": "large"])
+        ]
+        do {
+            for (name, payload) in cases {
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                let decoded = try JSONDecoder().decode([String: DPSValue].self, from: data)
+                let state = DeviceState(dps: decoded)
+                print("\(name) speed=\(state.fanSpeed) max=\(state.fanSpeedMax) key=\(state.fanSpeedKey ?? "nil")")
+            }
+            print("FANRANGE_OK")
+            exit(0)
+        } catch {
+            print("FANRANGE_ERROR \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+
+    /// Curtain keys are selected by value type: string dp = action,
+    /// numeric dp = position.
+    private static func proveCurtainKeys() {
+        let cases: [(String, [String: Any])] = [
+            ("closed_curtain", ["1": "close", "3": 100]),
+            ("alt_layout", ["1": "open", "2": 50]),
+            ("numeric_only", ["2": 60])
+        ]
+        do {
+            for (name, payload) in cases {
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                let decoded = try JSONDecoder().decode([String: DPSValue].self, from: data)
+                let state = DeviceState(dps: decoded)
+                print("\(name) action=\(state.curtainActionKey ?? "nil") position=\(state.curtainPositionKey ?? "nil") actionValue=\(state.curtainAction ?? "nil")")
+            }
+            print("CURTAIN_KEYS_OK")
+            exit(0)
+        } catch {
+            print("CURTAIN_KEYS_ERROR \(error.localizedDescription)")
+            exit(1)
+        }
     }
 }
 

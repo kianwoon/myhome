@@ -131,6 +131,12 @@ public enum DPSValue: Codable, Hashable, CustomStringConvertible {
 /// optional; a missing or unexpected DP simply yields nil and the caller
 /// renders a fallback.
 public struct DeviceState {
+    /// Tuya fs-category numeric gear fans support six custom speeds even though
+    /// the cloud function spec does not expose dp 3's range. String-mode fans
+    /// are the classic small/middle/large triple.
+    public static let numericFanSpeedMax = 6
+    public static let stringFanSpeedMax = 3
+
     public let dps: [String: DPSValue]
 
     public init(dps: [String: DPSValue]) {
@@ -166,9 +172,13 @@ public struct DeviceState {
     }
 
     public var fanSpeed: Int {
+        // General rule: a speed control's range must equal the device's real
+        // capability range — numeric-gear fans in the Tuya fs category support
+        // 1-6; string-mode fans map small/middle/large to 1-3. Never a
+        // UI-invented clamp.
         guard let key = fanSpeedKey, let value = dps[key] else { return 1 }
         if let number = value.doubleValue {
-            return min(max(Int(number.rounded()), 1), 4)
+            return min(max(Int(number.rounded()), 1), fanSpeedMax)
         }
         switch value.stringValue?.lowercased() ?? "" {
         case "small": return 1
@@ -176,6 +186,11 @@ public struct DeviceState {
         case "large": return 3
         default: return 1
         }
+    }
+
+    public var fanSpeedMax: Int {
+        guard let key = fanSpeedKey else { return Self.numericFanSpeedMax }
+        return dps[key]?.doubleValue != nil ? Self.numericFanSpeedMax : Self.stringFanSpeedMax
     }
 
     public var oscillationKey: String? {
@@ -193,16 +208,31 @@ public struct DeviceState {
     // MARK: Curtains
 
     public var position: Double? {
-        guard let value = dps["2"]?.doubleValue else { return nil }
+        guard let key = curtainPositionKey, let value = dps[key]?.doubleValue else { return nil }
         return min(max(value, 0), 100)
     }
 
+    // General rule: in a curtain's dps pair, the STRING-valued dp carries
+    // actions (open/stop/close) and the NUMERIC-valued dp carries position
+    // percent — select each key by value type (mirroring fan speed), never by
+    // fixed key number. Fallback to fixed keys only when types are ambiguous.
     public var curtainActionKey: String? {
-        dps["3"] == nil ? nil : "3"
+        for key in ["1", "2", "3"] where dps[key]?.stringValue != nil {
+            return key
+        }
+        return nil
+    }
+
+    public var curtainPositionKey: String? {
+        for key in ["2", "3"] where dps[key]?.doubleValue != nil {
+            return key
+        }
+        return nil
     }
 
     public var curtainAction: String? {
-        dps["3"]?.stringValue
+        guard let key = curtainActionKey else { return nil }
+        return dps[key]?.stringValue
     }
 
     // MARK: Lights

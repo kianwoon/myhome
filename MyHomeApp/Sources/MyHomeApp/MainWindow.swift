@@ -255,7 +255,7 @@ struct FanControlView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                ForEach(1...4, id: \.self) { level in
+                ForEach(1...state.fanSpeedMax, id: \.self) { level in
                     Button {
                         Task {
                             await store.setDps(
@@ -307,8 +307,6 @@ struct CurtainControlView: View {
     @State private var position: Double = 0
     @State private var isDragging = false
 
-    private var actionKey: String { state.curtainActionKey ?? "3" }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -317,23 +315,30 @@ struct CurtainControlView: View {
                     .foregroundStyle(.secondary)
                 Slider(value: $position, in: 0...100, onEditingChanged: { editing in
                     isDragging = editing
-                    if !editing {
+                    if !editing, let positionKey = state.curtainPositionKey {
                         Task {
-                            await store.setDps(device, ["2": Int(position.rounded())])
+                            await store.setDps(device, [positionKey: Int(position.rounded())])
                         }
                     }
                 })
                 .controlSize(.mini)
+                .disabled(state.curtainPositionKey == nil)
                 Text("\(Int(position.rounded())) %")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(width: 38, alignment: .trailing)
             }
 
-            HStack(spacing: 6) {
-                actionButton("Open", icon: "arrow.up.to.line", value: "open")
-                actionButton("Stop", icon: "stop.fill", value: "stop")
-                actionButton("Close", icon: "arrow.down.to.line", value: "close")
+            if let actionKey = state.curtainActionKey {
+                HStack(spacing: 6) {
+                    actionButton("Open", icon: "arrow.up.to.line", value: "open", key: actionKey)
+                    actionButton("Stop", icon: "stop.fill", value: "stop", key: actionKey)
+                    actionButton("Close", icon: "arrow.down.to.line", value: "close", key: actionKey)
+                }
+            } else {
+                Text("Action control unavailable")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .onAppear { position = state.position ?? 0 }
@@ -344,13 +349,13 @@ struct CurtainControlView: View {
         }
     }
 
-    private func actionButton(_ title: String, icon: String, value: String) -> some View {
+    private func actionButton(_ title: String, icon: String, value: String, key: String) -> some View {
         Button {
             Task {
                 await store.setDps(
                     device,
-                    [actionKey: value],
-                    optimistic: [actionKey: .string(value)]
+                    [key: value],
+                    optimistic: [key: .string(value)]
                 )
             }
         } label: {
