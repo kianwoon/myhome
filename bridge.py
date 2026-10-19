@@ -164,6 +164,9 @@ def handle_set(device_id, dps):
 
 
 def handle_list():
+    # General rule: the list reply is the app's view of the persisted roster.
+    # Every field the UI consumes (including capability metadata) must
+    # round-trip through it, not just identity/address fields.
     devices = []
     for config in _devices:
         devices.append({
@@ -173,6 +176,7 @@ def handle_list():
             "version": config.get("version"),
             "category": config.get("category"),
             "online": bool(config.get("ip")),
+            "spec": config.get("spec"),
         })
     return {"ok": True, "devices": devices}
 
