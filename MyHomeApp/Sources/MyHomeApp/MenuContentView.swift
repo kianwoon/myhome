@@ -5,7 +5,7 @@ import MyHomeCore
 
 struct MenuContentView: View {
     @EnvironmentObject private var store: DeviceStore
-    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var ui: UIState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -50,8 +50,7 @@ struct MenuContentView: View {
 
             HStack(spacing: 12) {
                 Button("Open MyHome") {
-                    openWindow(id: "dashboard")
-                    NSApp.activate(ignoringOtherApps: true)
+                    ui.showDashboard = true
                 }
                 Button("Rescan") {
                     Task { await store.rescan() }
