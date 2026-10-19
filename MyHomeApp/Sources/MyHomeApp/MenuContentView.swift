@@ -52,11 +52,6 @@ struct MenuContentView: View {
                 Button("Open MyHome") {
                     ui.showDashboard = true
                 }
-                // General rule: the house icon must always land on the compact
-                // device list. The dashboard is a per-open view: closing the
-                // panel resets it, so a stale dashboard state never survives
-                // to the next panel open.
-                .onDisappear { ui.showDashboard = false }
                 Button("Rescan") {
                     Task { await store.rescan() }
                 }

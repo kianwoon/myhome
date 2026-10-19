@@ -11,6 +11,28 @@ import MyHomeCore
 /// observe the store.
 final class UIState: ObservableObject {
     @Published var showDashboard = false
+    private var observer: NSObjectProtocol?
+
+    init() {
+        // General rule: the MenuBarExtra panel's hosting view NEVER gets
+        // onDisappear (it stays alive across open/close), so view-lifecycle
+        // hooks cannot reset panel state. The reliable signal is the panel
+        // WINDOW resigning key — i.e. the user clicked anywhere else. That is
+        // the moment the dashboard view must reset to the compact list.
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.showDashboard = false
+            }
+        }
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
 }
 
 @main
