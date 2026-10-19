@@ -64,6 +64,7 @@ struct MenuContentView: View {
                     Task { await store.rescan() }
                 }
                 .disabled(store.isWorking)
+                SettingsLauncher()
                 Spacer()
                 Button("Quit") {
                     NSApp.terminate(nil)
@@ -81,6 +82,25 @@ struct MenuContentView: View {
         }
         .onAppear { store.startPolling() }
         .onDisappear { store.stopPolling() }
+    }
+}
+
+/// Opens the native Settings scene from the menu panel.
+///
+/// macOS 14 exposes `SettingsLink`; macOS 13 has no such view, so the standard
+/// AppKit `showSettingsWindow:` action is used there instead.
+struct SettingsLauncher: View {
+    var body: some View {
+        if #available(macOS 14.0, *) {
+            SettingsLink {
+                Text("Settings…")
+            }
+        } else {
+            Button("Settings…") {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
 }
 

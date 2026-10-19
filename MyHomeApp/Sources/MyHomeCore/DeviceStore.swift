@@ -61,6 +61,10 @@ public final class DeviceStore: ObservableObject {
     }
 
     private let bridge: any BridgeSending
+    /// Snapshot of the Control-tab defaults, read once on start so a poll cycle
+    /// never changes cadence mid-flight.
+    private let pollInterval: TimeInterval
+    private let scanWindow: Int
     private var loadedStatus: Set<String> = []
     private var pollTask: Task<Void, Never>?
     private var pollObservers = 0
@@ -69,8 +73,13 @@ public final class DeviceStore: ObservableObject {
     private var specsFetched = false
     private var specsFetching = false
 
-    public init(bridge: any BridgeSending = BridgeClient.shared) {
+    /// General rule: behavior-tuning values are user settings, not hard-coded
+    /// constants. The constants below are the DEFAULTS; the Settings screen
+    /// writes UserDefaults and this initializer snapshots them once.
+    public init(bridge: any BridgeSending = BridgeClient.shared, defaults: UserDefaults = .standard) {
         self.bridge = bridge
+        self.pollInterval = AppSettings.pollInterval(from: defaults)
+        self.scanWindow = AppSettings.scanWindow(from: defaults)
     }
 
     // MARK: - Derived state
@@ -135,7 +144,7 @@ public final class DeviceStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
-            let reply = try await bridge.request(["cmd": "rescan"], timeout: 30)
+            let reply = try await bridge.request(["cmd": "rescan", "window": scanWindow], timeout: 90)
             guard reply["ok"] as? Bool == true else {
                 errorText = reply["error"] as? String ?? "Scan failed."
                 return
@@ -185,7 +194,7 @@ public final class DeviceStore: ObservableObject {
                 await refreshCloudStatus()
             }
             do {
-                try await Task.sleep(nanoseconds: UInt64(Self.statusPollInterval * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
             } catch {
                 return
             }

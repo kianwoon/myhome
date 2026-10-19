@@ -16,6 +16,8 @@ Requests:
     {"cmd":"cloudstatus","id":"<device-id>"}
     {"cmd":"specs"}
     {"cmd":"specs","id":"<device-id>"}
+    {"cmd":"config"}
+    {"cmd":"setconfig","apiKey":"...","apiSecret":"...","apiRegion":"..."}
 """
 
 import json
@@ -209,9 +211,14 @@ def handle_list():
     return {"ok": True, "devices": devices}
 
 
-def handle_rescan():
+def handle_rescan(request=None):
     """Scan the LAN and merge ip/version into devices.json, preserving keys."""
-    scan = tinytuya.deviceScan(poll=False, color=False)
+    window = (request or {}).get("window", 35)
+    try:
+        window = min(max(int(window), 15), 60)
+    except (TypeError, ValueError):
+        window = 35
+    scan = tinytuya.deviceScan(poll=False, color=False, maxretry=window)
     if not isinstance(scan, dict):
         scan = {}
 
@@ -467,6 +474,138 @@ def make_cloud():
     )
 
 
+def load_credentials():
+    """Read tinytuya.json, returning an empty dict when it is absent/invalid."""
+    try:
+        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as handle:
+            credentials = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return credentials if isinstance(credentials, dict) else {}
+
+
+def mask_secret(secret):
+    """Show enough to recognise a secret without ever returning it whole."""
+    if not isinstance(secret, str) or not secret:
+        return ""
+    if len(secret) <= 8:
+        return "…"
+    return secret[:4] + "…" + secret[-3:]
+
+
+def handle_config():
+    """Report non-secret cloud settings plus a masked access secret.
+
+    General rule: credentials never leave the bridge in clear text. Only the
+    access ID (not a secret by itself) and a masked form of the secret are
+    emitted so the Settings screen can show what is configured.
+    """
+    credentials = load_credentials()
+    return {
+        "ok": True,
+        "config": {
+            "apiKey": credentials.get("apiKey", ""),
+            "apiSecretMasked": mask_secret(credentials.get("apiSecret")),
+            "apiRegion": credentials.get("apiRegion", ""),
+            "devicesPath": DEVICES_PATH,
+            "pollNotes": (
+                "Poll interval and scan window are app-side settings (Control tab). "
+                "The bridge auto-heals with a %ds UDP scan window." % autohealScanWindow
+            ),
+        },
+    }
+
+
+def write_credentials(credentials):
+    """Atomically replace tinytuya.json, preserving owner-only permissions."""
+    directory = os.path.dirname(CREDENTIALS_PATH)
+    descriptor, temp_path = tempfile.mkstemp(prefix=".tinytuya-", dir=directory)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(credentials, handle, indent=4)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, CREDENTIALS_PATH)
+        os.chmod(CREDENTIALS_PATH, 0o600)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def handle_setconfig(request):
+    """Validate NEW credentials against the real cloud, then persist them.
+
+    General rule: never write a credential the cloud has not accepted — a bad
+    secret would otherwise break cloudsync, status badges, and specs until a
+    human repairs the file. The current file is left completely untouched on
+    any failure.
+    """
+    credentials = load_credentials()
+
+    for field in ("apiKey", "apiSecret", "apiRegion"):
+        if field not in request:
+            continue
+        value = request.get(field)
+        if not isinstance(value, str):
+            return {"ok": False, "error": field + " must be a string"}
+        value = value.strip()
+        if field == "apiSecret" and not value:
+            # Empty secret means "keep the stored one" so the UI can test an
+            # unchanged secret without ever displaying it.
+            continue
+        if not value:
+            return {"ok": False, "error": field + " required"}
+        credentials[field] = value
+
+    if not credentials.get("apiKey") or not credentials.get("apiSecret"):
+        return {"ok": False, "error": "apiKey and apiSecret required"}
+    if not credentials.get("apiRegion"):
+        return {"ok": False, "error": "apiRegion required"}
+
+    try:
+        cloud = tinytuya.Cloud(
+            apiRegion=credentials.get("apiRegion"),
+            apiKey=credentials.get("apiKey"),
+            apiSecret=credentials.get("apiSecret"),
+            apiDeviceID=credentials.get("apiDeviceID"),
+        )
+    except TypeError:
+        return {"ok": False, "error": "auth failed"}
+    except Exception as exc:
+        return {"ok": False, "error": "cloud test failed: " + type(exc).__name__}
+
+    # A wrong key/secret never yields a token. Check this explicitly: the
+    # device-list helper can degrade to an EMPTY list when the token call
+    # failed, which would otherwise look like a healthy account.
+    if not cloud.token:
+        error = cloud.error if isinstance(cloud.error, dict) else {}
+        if str(error.get("Err")) in ("909", "911"):
+            return {"ok": False, "error": "auth failed"}
+        return {"ok": False, "error": "cloud test failed: " + str(error.get("Err"))}
+
+    try:
+        result = cloud.getdevices(False)
+    except Exception as exc:
+        return {"ok": False, "error": "cloud test failed: " + type(exc).__name__}
+
+    if isinstance(result, dict) and result.get("Error"):
+        if str(result.get("Err")) in ("909", "911"):
+            return {"ok": False, "error": "auth failed"}
+        return {"ok": False, "error": "cloud test failed: " + str(result.get("Err"))}
+    if not isinstance(result, list):
+        return {"ok": False, "error": "cloud test failed"}
+
+    try:
+        write_credentials(credentials)
+    except Exception as exc:
+        return {"ok": False, "error": "credentials write failed: " + type(exc).__name__}
+    return {"ok": True, "tested": True}
+
+
 def fetch_spec(cloud, device_id):
     """Fetch one device's declared functions and normalise them by dp id."""
     url = "/v1.1/devices/%s/specifications" % device_id
@@ -616,13 +755,17 @@ def dispatch(request):
             return {"ok": False, "error": "missing device id"}
         return handle_set(device_id, request.get("dps"))
     if cmd == "rescan":
-        return handle_rescan()
+        return handle_rescan(request)
     if cmd == "cloudsync":
         return handle_cloudsync()
     if cmd == "cloudstatus":
         return handle_cloudstatus(request)
     if cmd == "specs":
         return handle_specs(request)
+    if cmd == "config":
+        return handle_config()
+    if cmd == "setconfig":
+        return handle_setconfig(request)
     return {"ok": False, "error": "unknown command"}
 
 

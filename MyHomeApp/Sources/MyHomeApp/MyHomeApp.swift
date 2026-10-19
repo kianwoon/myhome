@@ -38,6 +38,10 @@ struct MyHomeApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            SettingsView()
+        }
     }
 }
 
