@@ -141,13 +141,28 @@ public struct DeviceState {
     /// are the classic small/middle/large triple.
     public static let numericFanSpeedMax = 6
     public static let stringFanSpeedMax = 3
+    public static let batteryNormalThreshold = 50.0
+    public static let batteryLowThreshold = 20.0
 
     public let dps: [String: DPSValue]
     public let capabilities: [Capability]
+    /// Cloud-code -> local-dp ids correlated by the bridge (status-only dps).
+    public let codes: [String: String]
 
-    public init(dps: [String: DPSValue], capabilities: [Capability] = []) {
+    public init(
+        dps: [String: DPSValue],
+        capabilities: [Capability] = [],
+        codes: [String: String] = [:]
+    ) {
         self.dps = dps
         self.capabilities = capabilities
+        self.codes = codes
+    }
+
+    /// Percent only for v1: battery level enums (1-4) are not rendered.
+    public var batteryPercent: Double? {
+        guard let dpId = codes["battery_percentage"] else { return nil }
+        return dps[dpId]?.doubleValue
     }
 
     /// Controls rendered from the spec. dp 1 is the card's master power

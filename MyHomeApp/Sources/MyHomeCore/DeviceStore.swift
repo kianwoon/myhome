@@ -75,6 +75,8 @@ public final class DeviceStore: ObservableObject {
     private var isCloudSyncing = false
     private var specsFetched = false
     private var specsFetching = false
+    private var codesFetched = false
+    private var codesFetching = false
     private var schedulesDeviceId: String?
 
     /// General rule: behavior-tuning values are user settings, not hard-coded
@@ -101,7 +103,11 @@ public final class DeviceStore: ObservableObject {
     }
 
     public func state(for device: Device) -> DeviceState {
-        DeviceState(dps: dpsById[device.id] ?? [:], capabilities: device.capabilities)
+        DeviceState(
+            dps: dpsById[device.id] ?? [:],
+            capabilities: device.capabilities,
+            codes: device.codes ?? [:]
+        )
     }
 
     /// nil until a fetch (or confirmed write) has reported dps 1.
@@ -139,6 +145,7 @@ public final class DeviceStore: ObservableObject {
             // until status arrives.
             errorText = nil
             requestSpecsIfNeeded()
+            requestCodeMapIfNeeded()
         } catch {
             errorText = error.localizedDescription
         }
@@ -163,6 +170,8 @@ public final class DeviceStore: ObservableObject {
         await refresh()
         // Manual Rescan also forces an immediate cloud identity sync.
         await cloudSync()
+        // Status-only code correlations are refreshed with the roster.
+        await refreshCodeMap()
     }
 
     // MARK: - Polling
@@ -331,6 +340,43 @@ public final class DeviceStore: ObservableObject {
                 // Leave specsFetching false so a later refresh can retry.
             }
             self.specsFetching = false
+        }
+    }
+
+    /// Correlates cloud status codes with local dps once per launch (the
+    /// bridge caches the map in devices.json); rescan forces a refresh.
+    private func requestCodeMapIfNeeded() {
+        guard !codesFetching, !codesFetched else { return }
+        guard devices.contains(where: { $0.codes == nil }) else {
+            codesFetched = true
+            return
+        }
+        codesFetching = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let reply = try await self.bridge.request(["cmd": "codemap"], timeout: 180)
+                if reply["ok"] as? Bool == true {
+                    self.codesFetched = true
+                    await self.refresh()
+                }
+            } catch {
+                // Leave codesFetching false so a later refresh can retry.
+            }
+            self.codesFetching = false
+        }
+    }
+
+    /// Forced re-correlation used by manual Rescan.
+    public func refreshCodeMap() async {
+        do {
+            let reply = try await bridge.request(["cmd": "codemap"], timeout: 180)
+            if reply["ok"] as? Bool == true {
+                codesFetched = true
+                await refresh()
+            }
+        } catch {
+            // Keep the previous map; the next rescan retries.
         }
     }
 

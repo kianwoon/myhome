@@ -179,6 +179,13 @@ struct DeviceCard: View {
 
     private var power: Bool? { store.power(for: device) }
 
+    private var showPowerToggle: Bool {
+        if device.spec?["1"] != nil {
+            return device.spec?["1"]?.type.lowercased() == "boolean"
+        }
+        return true  // no spec: legacy behaviour
+    }
+
     private var powerBinding: Binding<Bool> {
         Binding(
             get: { store.power(for: device) ?? false },
@@ -226,20 +233,29 @@ struct DeviceCard: View {
                             .lineLimit(1)
                         CloudStatusBadge(online: store.cloudOnline[device.id])
                     }
-                    Text(summary(state))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(summary(state))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        BatteryChip(percent: state.batteryPercent)
+                    }
                 }
 
                 Spacer(minLength: 4)
 
-                Toggle("", isOn: powerBinding)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .disabled(!isEnabled || power == nil)
-                    .opacity(power == nil ? 0.5 : 1)
+                // General rule: dp 1 is a power toggle ONLY when it is a
+                // Boolean dp. On curtains dp 1 is the Enum action
+                // (open/stop/close) — a boolean toggle there writes garbage the
+                // device ignores, so it is hidden, not disabled.
+                if showPowerToggle {
+                    Toggle("", isOn: powerBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .disabled(!isEnabled || power == nil)
+                        .opacity(power == nil ? 0.5 : 1)
+                }
             }
 
             SpecControlsView(device: device, state: state)
@@ -363,6 +379,36 @@ struct CloudStatusBadge: View {
     }
 }
 
+/// Battery is a status-only dp discovered by cloud/local correlation; no map
+/// or no value means no chip. Thresholds are named constants on DeviceState.
+struct BatteryChip: View {
+    let percent: Double?
+
+    var body: some View {
+        if let percent = percent {
+            Text(label(percent))
+                .font(.caption2.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(tint(percent))
+                .fixedSize()
+        }
+    }
+
+    private func label(_ percent: Double) -> String {
+        let value = Int(percent.rounded())
+        if percent < DeviceState.batteryLowThreshold {
+            return "🔋 \(value)% (low)"
+        }
+        return "🔋 \(value)%"
+    }
+
+    private func tint(_ percent: Double) -> Color {
+        if percent >= DeviceState.batteryNormalThreshold { return .secondary }
+        if percent >= DeviceState.batteryLowThreshold { return .orange }
+        return .red
+    }
+}
+
 // MARK: - Rich controls
 
 struct RichControlView: View {
@@ -458,7 +504,11 @@ struct CurtainControlView: View {
     @State private var position: Double = 0
     @State private var isDragging = false
     private var showPosition: Bool { !state.isDeclared(state.curtainPositionKey) }
-    private var showActions: Bool { !state.isDeclared(state.curtainActionKey) }
+    // General rule: a device type's PRIMARY control (curtain open/stop/close)
+    // always renders. The spec-declaration gate exists to hide DUPLICATE
+    // inferred controls, not to suppress the primary one — on curtains dp 1
+    // is declared (Enum control) yet the buttons are still the right UI.
+    private var showActions: Bool { device.kind == .curtain && state.curtainActionKey != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -718,6 +768,7 @@ struct DeviceDetailView: View {
                             .font(.headline)
                             .foregroundStyle(state.power == true ? Color.green : Color.secondary)
                     }
+                    BatteryChip(percent: state.batteryPercent)
                     Spacer()
                 }
 
