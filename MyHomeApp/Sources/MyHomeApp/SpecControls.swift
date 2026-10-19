@@ -95,7 +95,9 @@ private struct CapabilityRow: View {
             // all, and any range whose tick count would exceed 100 renders
             // step-free (continuous, zero tick marks).
             if capability.code.lowercased().contains("countdown") {
-                EmptyView()
+                // Countdown dps get an explicit preset picker, never a stepped
+                // slider: seconds are written directly, so no tick marks exist.
+                CountdownPicker(device: device, state: state, capability: capability)
             } else if let lower = capability.minValue, let upper = capability.maxValue {
                 let ticks = (upper - lower) / (capability.step ?? 1)
                 if ticks > 100 {
@@ -166,5 +168,68 @@ private struct CapabilityRow: View {
             return "\(text) \(unit)"
         }
         return text
+    }
+}
+
+/// Preset timer control for spec-declared countdown dps. Values are written as
+/// integer seconds through the normal setDps path; a status value that matches
+/// no preset appears as its own option so the current setting stays visible.
+private struct CountdownPicker: View {
+    @EnvironmentObject private var store: DeviceStore
+    let device: Device
+    let state: DeviceState
+    let capability: Capability
+
+    private static let presets: [(seconds: Int, label: String)] = [
+        (0, "Off"),
+        (900, "15 min"),
+        (1800, "30 min"),
+        (3600, "1 h"),
+        (7200, "2 h"),
+        (14400, "4 h"),
+        (28800, "8 h"),
+    ]
+
+    var body: some View {
+        let current = max(0, state.dps[capability.dpId]?.intValue ?? 0)
+        let options = Self.presets.contains { $0.seconds == current }
+            ? Self.presets
+            : Self.presets + [(current, Self.durationLabel(current))]
+
+        HStack(spacing: 8) {
+            Text(capability.displayName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Picker("Timer", selection: Binding(
+                get: { current },
+                set: { seconds in
+                    Task {
+                        await store.setDps(
+                            device,
+                            [capability.dpId: seconds],
+                            optimistic: [capability.dpId: .number(Double(seconds))]
+                        )
+                    }
+                }
+            )) {
+                ForEach(options, id: \.seconds) { option in
+                    Text(option.label).tag(option.seconds)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+        }
+    }
+
+    private static func durationLabel(_ seconds: Int) -> String {
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+        }
+        if minutes > 0 { return "\(minutes) min" }
+        return "\(seconds) s"
     }
 }

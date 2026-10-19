@@ -10,6 +10,7 @@ Requests:
     {"cmd":"list"}
     {"cmd":"status","id":"<device-id>"}
     {"cmd":"set","id":"<device-id>","dps":{...}}
+    {"cmd":"rename","id":"<device-id>","name":"<new-name>"}
     {"cmd":"rescan"}
     {"cmd":"cloudsync"}
     {"cmd":"cloudstatus"}
@@ -191,6 +192,50 @@ def handle_set(device_id, dps):
         return {"ok": True, "dps": read_status(device)}
     except Exception as exc:
         return {"ok": False, "error": str(exc) or "set failed"}
+
+
+def handle_rename(request):
+    """Rename a device upstream, then mirror the confirmed name into the roster.
+
+    General rule: cloud-identity fields (name included) are cloud-authoritative,
+    so a rename must be applied UPSTREAM first; writing it locally alone would
+    be stomped by the next cloudsync. The local roster is only updated after
+    the cloud accepts the change.
+    """
+    device_id = request.get("id")
+    name = request.get("name")
+    if not isinstance(device_id, str) or not device_id:
+        return {"ok": False, "error": "missing device id"}
+    if not isinstance(name, str):
+        return {"ok": False, "error": "missing name"}
+    name = name.strip()
+    if not name or len(name) > 50:
+        return {"ok": False, "error": "name must be 1-50 characters"}
+    if find_device(device_id) is None:
+        return {"ok": False, "error": "unknown device id"}
+
+    try:
+        cloud = make_cloud()
+        response = cloud.cloudrequest(
+            "/v1.0/devices/%s" % device_id, "PUT", post={"name": name}
+        )
+    except Exception as exc:
+        # Never include token/secret material in the reply.
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+
+    if not isinstance(response, dict) or not response.get("success") or not response.get("result"):
+        return {"ok": False, "error": "cloud rename failed"}
+
+    def merge(fresh):
+        for config in fresh:
+            if config.get("id") == device_id:
+                config["name"] = name
+
+    try:
+        apply_to_disk(merge)
+    except Exception as exc:
+        return {"ok": False, "error": "devices write failed: " + type(exc).__name__}
+    return {"ok": True, "name": name}
 
 
 def handle_list():
@@ -754,6 +799,8 @@ def dispatch(request):
         if not isinstance(device_id, str):
             return {"ok": False, "error": "missing device id"}
         return handle_set(device_id, request.get("dps"))
+    if cmd == "rename":
+        return handle_rename(request)
     if cmd == "rescan":
         return handle_rescan(request)
     if cmd == "cloudsync":

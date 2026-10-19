@@ -173,6 +173,7 @@ struct DeviceCard: View {
     let device: Device
     let isSelected: Bool
     let onSelect: () -> Void
+    @State private var showingRename = false
 
     private var isEnabled: Bool { device.hasAddress }
 
@@ -264,6 +265,71 @@ struct DeviceCard: View {
         .opacity(isEnabled ? 1 : 0.55)
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onTapGesture(perform: onSelect)
+        .contextMenu {
+            Button("Rename…") { showingRename = true }
+        }
+        .sheet(isPresented: $showingRename) {
+            RenameSheet(device: device)
+        }
+    }
+}
+
+/// General rule: names are cloud-authoritative identity, so this sheet calls
+/// the bridge rename command (cloud PUT first) and lets the store re-list the
+/// confirmed roster instead of editing the local model directly.
+struct RenameSheet: View {
+    @EnvironmentObject private var store: DeviceStore
+    @Environment(\.dismiss) private var dismiss
+    let device: Device
+    @State private var name: String
+    @State private var saving = false
+
+    init(device: Device) {
+        self.device = device
+        _name = State(initialValue: device.name)
+    }
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var isValid: Bool { !trimmed.isEmpty && trimmed.count <= 50 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rename Device")
+                .font(.headline)
+            Text("Updates the name in Tuya Cloud, then re-syncs this roster.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+                .onSubmit(submit)
+            HStack {
+                if let error = store.errorText {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(saving ? "Renaming…" : "Rename", action: submit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isValid || saving)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+    }
+
+    private func submit() {
+        guard isValid, !saving else { return }
+        saving = true
+        Task {
+            let ok = await store.rename(device, to: trimmed)
+            saving = false
+            if ok { dismiss() }
+        }
     }
 }
 
@@ -601,6 +667,7 @@ struct RawPreviewView: View {
 struct DeviceDetailView: View {
     @EnvironmentObject private var store: DeviceStore
     let device: Device
+    @State private var showingRename = false
 
     private var state: DeviceState { store.state(for: device) }
 
@@ -632,6 +699,9 @@ struct DeviceDetailView: View {
                     }
 
                     Spacer()
+
+                    Button("Rename…") { showingRename = true }
+                        .controlSize(.small)
                 }
 
                 HStack(spacing: 10) {
@@ -702,6 +772,9 @@ struct DeviceDetailView: View {
         }
         .task(id: device.id) {
             await store.loadStatus(for: device)
+        }
+        .sheet(isPresented: $showingRename) {
+            RenameSheet(device: device)
         }
     }
 }

@@ -363,6 +363,35 @@ public final class DeviceStore: ObservableObject {
         }
     }
 
+    /// Renames upstream (cloud-authoritative identity) and re-lists so the new
+    /// name lands in the models. Returns false and leaves errorText set on
+    /// failure; never logs credentials.
+    @discardableResult
+    public func rename(_ device: Device, to newName: String) async -> Bool {
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 50 else {
+            errorText = "Name must be 1-50 characters."
+            return false
+        }
+        do {
+            let reply = try await bridge.request([
+                "cmd": "rename",
+                "id": device.id,
+                "name": name
+            ], timeout: 20)
+            guard reply["ok"] as? Bool == true else {
+                errorText = reply["error"] as? String ?? "Rename failed."
+                return false
+            }
+            errorText = nil
+            await refresh()
+            return true
+        } catch {
+            errorText = error.localizedDescription
+            return false
+        }
+    }
+
     private func applyStatus(_ id: String, decoded: [String: DPSValue]) {
         dpsById[id] = decoded
         statusErrors[id] = nil
