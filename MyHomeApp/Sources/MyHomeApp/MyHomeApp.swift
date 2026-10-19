@@ -3,15 +3,44 @@ import AppKit
 import SwiftUI
 import MyHomeCore
 
+/// UI shell state: which surface the (single) panel hosting view shows.
+/// General rule: the app renders in exactly ONE SwiftUI hosting view — the
+/// MenuBarExtra panel. A second live Window scene re-renders concurrently on
+/// macOS 27.x and its hosting view ping-pongs layout with the panel's
+/// (100% CPU DisplayList recursion, sampled twice), so no second scene may
+/// observe the store.
+final class UIState: ObservableObject {
+    @Published var showDashboard = false
+}
+
 @main
 struct MyHomeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = DeviceStore()
+    @StateObject private var ui = UIState()
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContentView()
+            Group {
+                if ui.showDashboard {
+                    DashboardView()
+                        .overlay(alignment: .topTrailing) {
+                            Button {
+                                ui.showDashboard = false
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(6)
+                            .help("Back to device list")
+                        }
+                } else {
+                    MenuContentView()
+                }
+            }
                 .environmentObject(store)
+                .environmentObject(ui)
                 // General rule: a MenuBarExtra .window panel must have fixed
                 // geometry. Its hosting view stays alive while closed; with
                 // content-driven height, every store write re-layouts it and,
@@ -22,22 +51,15 @@ struct MyHomeApp: App {
         } label: {
             ZStack {
                 Image(systemName: "house")
-                // General rule: a GUI defect in the main window needs a
-                // click-free repro path; this diagnostic opens the dashboard
-                // on launch when MYHOME_AUTOOPEN=1 and is inert otherwise.
+                // General rule: a GUI defect needs a click-free repro path;
+                // MYHOME_AUTOOPEN=1 shows the dashboard surface on launch.
                 AutoOpenTrigger()
+                    // Menu-bar labels render outside the scene's environment;
+                    // inject the shell state explicitly.
+                    .environmentObject(ui)
             }
         }
         .menuBarExtraStyle(.window)
-
-        Window("MyHome", id: "dashboard") {
-            DashboardView()
-                .environmentObject(store)
-        }
-        .defaultSize(width: 760, height: 520)
-        .commands {
-            CommandGroup(replacing: .newItem) {}
-        }
     }
 }
 
@@ -55,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// Diagnostic-only launch trigger: opens the dashboard without a click so the
 /// main window's layout/polling behavior can be reproduced headlessly.
 struct AutoOpenTrigger: View {
-    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var ui: UIState
 
     var body: some View {
         Color.clear
@@ -66,8 +88,7 @@ struct AutoOpenTrigger: View {
                 }
                 Task {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    openWindow(id: "dashboard")
-                    NSApp.activate(ignoringOtherApps: true)
+                    ui.showDashboard = true
                 }
             }
     }
