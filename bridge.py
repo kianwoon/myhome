@@ -661,13 +661,22 @@ def handle_setconfig(request):
 
 
 def fetch_spec(cloud, device_id):
-    """Fetch one device's declared functions and normalise them by dp id."""
+    """Fetch one device's declared functions and status codes.
+
+    General rule: code -> dp mappings come from the AUTHORITATIVE specification
+    status section, never from runtime value correlation. The specifications
+    endpoint declares both "functions" and "status"; every status entry carries
+    a code and its dp_id, including status-only dps such as battery_percentage.
+
+    Returns (spec, codes), where spec is normalised by dp id and codes maps
+    each declared code to its dp id (as a string), or (None, None) on failure.
+    """
     url = "/v1.1/devices/%s/specifications" % device_id
     response = cloud.cloudrequest(url, "GET")
     body = response.get("result", response) if isinstance(response, dict) else None
     functions = body.get("functions") if isinstance(body, dict) else None
     if not isinstance(functions, list):
-        return None
+        return None, None
 
     spec = {}
     for function in functions:
@@ -687,7 +696,19 @@ def fetch_spec(cloud, device_id):
             "type": function.get("type", ""),
             "values": values,
         }
-    return spec
+
+    codes = {}
+    status = body.get("status") if isinstance(body, dict) else None
+    if isinstance(status, list):
+        for item in status:
+            if not isinstance(item, dict):
+                continue
+            dp_id = item.get("dp_id")
+            code = item.get("code")
+            if dp_id is None or not isinstance(code, str) or not code:
+                continue
+            codes[code] = str(dp_id)
+    return spec, codes
 
 
 def handle_specs(request):
@@ -715,30 +736,31 @@ def handle_specs(request):
 
     updated = 0
     failures = 0
-    fetched_specs = {}
+    fetched = {}
     for config in targets:
         if device_id is None and config.get("spec") and not request.get("refresh"):
             continue
         try:
-            spec = fetch_spec(cloud, config.get("id"))
+            spec, codes = fetch_spec(cloud, config.get("id"))
         except Exception:
             failures += 1
             continue
         if spec:
-            fetched_specs[config.get("id")] = spec
+            fetched[config.get("id")] = (spec, codes or {})
             updated += 1
         else:
             failures += 1
 
-    if fetched_specs:
-        # General rule: shared mutable state — merge only the spec delta by id
+    if fetched:
+        # General rule: shared mutable state — merge only the spec/codes delta by id
         # into a fresh read; never dump the serving cache.
         def merge(fresh):
             by_id = {config.get("id"): config for config in fresh}
-            for target_id, spec in fetched_specs.items():
+            for target_id, (spec, codes) in fetched.items():
                 target = by_id.get(target_id)
                 if target is not None:
                     target["spec"] = spec
+                    target["codes"] = codes
 
         try:
             apply_to_disk(merge)
@@ -750,150 +772,18 @@ def handle_specs(request):
     return {"ok": True, "updated": updated}
 
 
-def _comparable(value):
-    """Canonical JSON form so equality is type-strict (True != 1)."""
-    try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return None
-
-
-def correlate_codes(cloud_status, local_dps):
-    """Map cloud status codes to local dp ids by exact value correlation.
-
-    General rule: status-only dps (battery, fault, signal) are discovered by
-    CORRELATING one cloud status read with one local status read — a cloud code
-    maps to the local dp whose value matches exactly, kept only when the match
-    is unambiguous (exactly one local dp matches that value among dps not
-    already mapped). The map is cached per device and refreshed on rescan.
-    """
-    mapping = {}
-    used = set()
-    if not isinstance(cloud_status, list) or not isinstance(local_dps, dict):
-        return mapping
-    pending = []
-    for item in cloud_status:
-        if not isinstance(item, dict):
-            continue
-        code = item.get("code")
-        value = item.get("value")
-        if not isinstance(code, str) or not code or value is None:
-            continue
-        target = _comparable(value)
-        if target is None:
-            continue
-        matches = [
-            dp_id
-            for dp_id, local_value in local_dps.items()
-            if dp_id not in used and _comparable(local_value) == target
-        ]
-        if len(matches) == 1:
-            mapping[code] = matches[0]
-            used.add(matches[0])
-        elif len(matches) > 1:
-            pending.append((code, target))
-
-    # Ambiguity resolution: when a value is shared by an EQUAL number of cloud
-    # codes and candidate dps, a single one-to-one assignment exists, so pair
-    # them in stable order (cloud order, numeric dp order). This is still
-    # unambiguous as a set and keeps e.g. battery_percentage mapped when a
-    # sibling status (percent_state) carries the same number.
-    by_value = {}
-    for code, target in pending:
-        by_value.setdefault(target, []).append(code)
-    for target, codes in by_value.items():
-        candidates = [
-            dp_id
-            for dp_id, local_value in local_dps.items()
-            if dp_id not in used and _comparable(local_value) == target
-        ]
-        candidates.sort(key=lambda dp_id: (int(dp_id) if dp_id.isdigit() else 10**9, dp_id))
-        if len(candidates) != len(codes):
-            continue
-        for code, dp_id in zip(codes, candidates):
-            mapping[code] = dp_id
-            used.add(dp_id)
-    return mapping
-
-
-def _cloud_status_result(cloud, device_id):
-    try:
-        response = cloud.getstatus(device_id)
-    except Exception:
-        return None
-    if isinstance(response, list):
-        return response
-    if isinstance(response, dict) and isinstance(response.get("result"), list):
-        return response["result"]
-    return None
-
-
 def handle_codemap(request):
-    """Cache cloud-code -> local-dp correlations (bulk, or one id)."""
-    device_id = request.get("id")
-    if device_id is not None and not isinstance(device_id, str):
-        return {"ok": False, "error": "bad device id"}
-    if device_id is not None:
-        targets = [config for config in _devices if config.get("id") == device_id]
-        if not targets:
-            return {"ok": False, "error": "unknown device id"}
-    else:
-        targets = list(_devices)
+    """Force-refresh the authoritative code -> dp map from the spec endpoint.
 
-    try:
-        cloud = make_cloud()
-    except Exception as exc:
-        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
-
-    maps = {}
-    updated = 0
-    failures = 0
-    battery = 0
-    for config in targets:
-        target_id = config.get("id")
-        if not target_id:
-            continue
-        if not config.get("ip"):
-            maps[target_id] = {}
-            continue
-        cloud_status = _cloud_status_result(cloud, target_id)
-        if cloud_status is None:
-            failures += 1
-            continue
-        try:
-            local_dps = read_status(make_device(config))
-        except Exception:
-            failures += 1
-            continue
-        mapping = correlate_codes(cloud_status, local_dps)
-        maps[target_id] = mapping
-        updated += 1
-        if "battery_percentage" in mapping:
-            battery += 1
-
-    if maps:
-        # General rule: shared mutable state — merge only the codes delta by id
-        # into a fresh read; never dump the serving cache.
-        def merge(fresh):
-            by_id = {config.get("id"): config for config in fresh}
-            for target_id, mapping in maps.items():
-                target = by_id.get(target_id)
-                if target is not None:
-                    target["codes"] = mapping
-
-        try:
-            apply_to_disk(merge)
-        except Exception as exc:
-            return {"ok": False, "error": "devices write failed: " + type(exc).__name__}
-
-    if updated == 0 and failures > 0 and not maps:
-        return {"ok": False, "error": "codemap failed"}
-    return {
-        "ok": True,
-        "updated": updated,
-        "codes": sum(len(mapping) for mapping in maps.values()),
-        "battery": battery,
-    }
+    General rule: code -> dp mappings come from the AUTHORITATIVE specification
+    status section, never from runtime value correlation. This command is a
+    thin force-refresh wrapper over the spec fetch, so repeated runs are
+    idempotent.
+    """
+    refreshed = dict(request)
+    refreshed["cmd"] = "specs"
+    refreshed["refresh"] = True
+    return handle_specs(refreshed)
 
 
 def handle_cloudstatus(request):
