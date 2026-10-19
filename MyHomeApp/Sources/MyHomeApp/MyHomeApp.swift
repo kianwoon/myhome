@@ -28,7 +28,12 @@ final class UIState: ObservableObject {
         ) { [weak self] note in
             guard let win = note.object as? NSWindow,
                   !win.occlusionState.contains(.visible) else { return }
+            // Debounce: the content swap when "Open MyHome" is clicked also
+            // blips occlusion for a frame. Only a REAL dismissal (user clicked
+            // elsewhere) stays not-visible past the grace period.
             Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                guard !win.isVisible else { return }
                 self?.showDashboard = false
             }
         }
