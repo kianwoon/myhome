@@ -48,6 +48,9 @@ public final class DeviceStore: ObservableObject {
     @Published public private(set) var cloudOnline: [String: Bool] = [:]
     @Published public private(set) var statusLoading: Set<String> = []
     @Published public private(set) var statusErrors: [String: String] = [:]
+    @Published public private(set) var schedules: [DeviceSchedule] = []
+    @Published public private(set) var schedulesLoading = false
+    @Published public private(set) var schedulesError: String?
     @Published public private(set) var errorText: String?
     @Published public private(set) var isWorking = false
 
@@ -72,6 +75,7 @@ public final class DeviceStore: ObservableObject {
     private var isCloudSyncing = false
     private var specsFetched = false
     private var specsFetching = false
+    private var schedulesDeviceId: String?
 
     /// General rule: behavior-tuning values are user settings, not hard-coded
     /// constants. The constants below are the DEFAULTS; the Settings screen
@@ -389,6 +393,104 @@ public final class DeviceStore: ObservableObject {
         } catch {
             errorText = error.localizedDescription
             return false
+        }
+    }
+
+    // MARK: - Schedules
+
+    /// Schedules are cloud-owned (not part of the roster), so they are fetched
+    /// on demand for the visible detail pane and reloaded after every change.
+    public func loadSchedules(for device: Device) async {
+        if schedulesDeviceId != device.id {
+            schedulesDeviceId = device.id
+            schedules = []
+        }
+        schedulesLoading = true
+        defer { schedulesLoading = false }
+        do {
+            let reply = try await bridge.request(
+                ["cmd": "schedules", "id": device.id],
+                timeout: 20
+            )
+            guard reply["ok"] as? Bool == true else {
+                schedulesError = reply["error"] as? String ?? "Could not load schedules."
+                return
+            }
+            let raw = reply["schedules"] ?? []
+            let data = try JSONSerialization.data(withJSONObject: raw)
+            schedules = try JSONDecoder().decode([DeviceSchedule].self, from: data)
+            schedulesError = nil
+        } catch {
+            schedulesError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    public func addSchedule(
+        for device: Device,
+        name: String,
+        days: [Bool],
+        time: String,
+        on: Bool
+    ) async -> Bool {
+        do {
+            let reply = try await bridge.request([
+                "cmd": "schedadd",
+                "id": device.id,
+                "name": name,
+                "days": days.map { $0 ? 1 : 0 },
+                "time": time,
+                "on": on
+            ], timeout: 20)
+            guard reply["ok"] as? Bool == true else {
+                schedulesError = reply["error"] as? String ?? "Could not add schedule."
+                return false
+            }
+            schedulesError = nil
+            await loadSchedules(for: device)
+            return true
+        } catch {
+            schedulesError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func setScheduleEnabled(_ schedule: DeviceSchedule, for device: Device, enabled: Bool) async {
+        do {
+            let reply = try await bridge.request([
+                "cmd": "schedtoggle",
+                "id": device.id,
+                "category": schedule.category,
+                "group_id": schedule.groupId,
+                "enable": enabled
+            ], timeout: 20)
+            guard reply["ok"] as? Bool == true else {
+                schedulesError = reply["error"] as? String ?? "Could not update schedule."
+                return
+            }
+            schedulesError = nil
+            await loadSchedules(for: device)
+        } catch {
+            schedulesError = error.localizedDescription
+        }
+    }
+
+    public func deleteSchedule(_ schedule: DeviceSchedule, for device: Device) async {
+        do {
+            let reply = try await bridge.request([
+                "cmd": "scheddel",
+                "id": device.id,
+                "category": schedule.category,
+                "group_id": schedule.groupId
+            ], timeout: 20)
+            guard reply["ok"] as? Bool == true else {
+                schedulesError = reply["error"] as? String ?? "Could not delete schedule."
+                return
+            }
+            schedulesError = nil
+            await loadSchedules(for: device)
+        } catch {
+            schedulesError = error.localizedDescription
         }
     }
 

@@ -15,6 +15,10 @@ Requests:
     {"cmd":"cloudsync"}
     {"cmd":"cloudstatus"}
     {"cmd":"cloudstatus","id":"<device-id>"}
+    {"cmd":"schedules","id":"<device-id>"}
+    {"cmd":"schedadd","id":"<device-id>","name":"...","days":[1,0,1,0,1,0,0],"time":"HH:MM","on":true}
+    {"cmd":"scheddel","id":"<device-id>","category":"...","group_id":"..."}
+    {"cmd":"schedtoggle","id":"<device-id>","category":"...","group_id":"...","enable":true}
     {"cmd":"specs"}
     {"cmd":"specs","id":"<device-id>"}
     {"cmd":"config"}
@@ -23,9 +27,11 @@ Requests:
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
+import time
 
 import tinytuya
 
@@ -783,6 +789,236 @@ def handle_cloudstatus(request):
     return {"ok": True, "status": status}
 
 
+OUR_SCHEDULE_CATEGORY = "myhomeapp"
+
+
+def _power_code(config):
+    """Power code from the device's Boolean dp-1 spec (fallback "switch")."""
+    spec = config.get("spec")
+    if isinstance(spec, dict):
+        first = spec.get("1")
+        if isinstance(first, dict) and str(first.get("type", "")).lower() == "boolean":
+            if first.get("code"):
+                return first["code"]
+        for declaration in spec.values():
+            if not isinstance(declaration, dict):
+                continue
+            if str(declaration.get("type", "")).lower() == "boolean" and declaration.get("code"):
+                return declaration["code"]
+    return "switch"
+
+
+def _system_timezone():
+    """Return (offset as +HH:MM, IANA id) for the host Mac."""
+    seconds = int(time.localtime().tm_gmtoff)
+    sign = "+" if seconds >= 0 else "-"
+    hours, remainder = divmod(abs(seconds), 3600)
+    offset = "%s%02d:%02d" % (sign, hours, remainder // 60)
+    timezone_id = "UTC"
+    try:
+        path = os.path.realpath("/etc/localtime")
+        marker = "zoneinfo/"
+        if marker in path:
+            timezone_id = path.split(marker, 1)[1]
+    except Exception:
+        pass
+    return offset, timezone_id
+
+
+def _schedule_value(raw):
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).lower() in ("1", "true", "on")
+
+
+def _schedule_entry(category, group, timer=None):
+    """Flatten one category/group/timer defensively; never raises.
+
+    Tuya returns both a nested shape (group.timers[]) and, historically, a
+    group-level instruct[] shape; accept both rather than keying on one.
+    """
+    group = group if isinstance(group, dict) else {}
+    timer = timer if isinstance(timer, dict) else {}
+    instruct = group.get("instruct")
+    first = instruct[0] if isinstance(instruct, list) and instruct else {}
+    if not isinstance(first, dict):
+        first = {}
+    functions = timer.get("functions")
+    if not isinstance(functions, list):
+        functions = first.get("functions")
+    function = functions[0] if isinstance(functions, list) and functions else {}
+    if not isinstance(function, dict):
+        function = {}
+    status = timer.get("status", group.get("status", 0))
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = 1 if status else 0
+    category = category if isinstance(category, str) else ""
+    return {
+        "group_id": str(group.get("group_id") or group.get("id") or ""),
+        "category": category,
+        "alias_name": str(timer.get("alias_name") or group.get("alias_name") or ""),
+        "loops": str(timer.get("loops") or group.get("loops") or ""),
+        "time": str(timer.get("time") or first.get("time") or group.get("time") or ""),
+        "code": str(function.get("code") or ""),
+        "value": _schedule_value(function.get("value")),
+        "status": status,
+        "ours": category == OUR_SCHEDULE_CATEGORY,
+    }
+
+
+def _flatten_schedules(result):
+    items = []
+    if not isinstance(result, list):
+        return items
+    for entry in result:
+        if not isinstance(entry, dict):
+            continue
+        raw_category = entry.get("category")
+        if isinstance(raw_category, dict):
+            category = raw_category.get("category") if isinstance(raw_category.get("category"), str) else ""
+        elif isinstance(raw_category, str):
+            category = raw_category
+        else:
+            category = ""
+        groups = entry.get("groups")
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                timers = group.get("timers")
+                if isinstance(timers, list) and timers:
+                    for timer in timers:
+                        if isinstance(timer, dict):
+                            items.append(_schedule_entry(category, group, timer))
+                else:
+                    items.append(_schedule_entry(category, group))
+        elif entry.get("group_id") or entry.get("instruct") or entry.get("time"):
+            items.append(_schedule_entry(category, entry))
+    return items
+
+
+def _cloud_reply(cloud, url, action=None, post=None):
+    """Call the cloud API and return (result, error string), never raising."""
+    try:
+        response = cloud.cloudrequest(url, action, post=post)
+    except Exception as exc:
+        return None, "cloud request failed: " + type(exc).__name__
+    if not isinstance(response, dict) or not response.get("success"):
+        return None, "schedule request failed"
+    return response.get("result"), None
+
+
+def handle_schedules(request):
+    """List all timer groups for a device, flattened across categories."""
+    device_id = request.get("id")
+    if not isinstance(device_id, str) or find_device(device_id) is None:
+        return {"ok": False, "error": "unknown device id"}
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+    result, error = _cloud_reply(cloud, "/v1.0/devices/%s/timers" % device_id)
+    if error is not None:
+        return {"ok": False, "error": error}
+    return {"ok": True, "schedules": _flatten_schedules(result)}
+
+
+def handle_schedadd(request):
+    """Create one timer group under the app-owned category."""
+    device_id = request.get("id")
+    config = find_device(device_id) if isinstance(device_id, str) else None
+    if config is None:
+        return {"ok": False, "error": "unknown device id"}
+    days = request.get("days")
+    if not isinstance(days, list) or len(days) != 7:
+        return {"ok": False, "error": "days must be 7 entries (Mon..Sun)"}
+    loops = "".join("1" if day else "0" for day in days)
+    clock = request.get("time")
+    if not isinstance(clock, str) or not re.match(r"^\d{2}:\d{2}$", clock):
+        return {"ok": False, "error": "time must be HH:MM"}
+    hour, minute = int(clock[:2]), int(clock[3:])
+    if hour > 23 or minute > 59:
+        return {"ok": False, "error": "time must be HH:MM"}
+    name = request.get("name") or ""
+    if not isinstance(name, str):
+        return {"ok": False, "error": "bad name"}
+    name = name.strip()[:50]
+    state = bool(request.get("on"))
+    offset, timezone_id = _system_timezone()
+    body = {
+        "category": OUR_SCHEDULE_CATEGORY,
+        "loops": loops,
+        "time_zone": offset,
+        "timezone_id": timezone_id,
+        "instruct": [{
+            "time": clock,
+            "functions": [{"code": _power_code(config), "value": state}],
+        }],
+        "alias_name": name,
+    }
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+    result, error = _cloud_reply(cloud, "/v1.0/devices/%s/timers" % device_id, "POST", body)
+    if error is not None:
+        return {"ok": False, "error": error}
+    group_id = result.get("group_id") if isinstance(result, dict) else result
+    return {"ok": True, "group_id": str(group_id or "")}
+
+
+def _schedule_target(request):
+    device_id = request.get("id")
+    category = request.get("category")
+    group_id = request.get("group_id")
+    if not isinstance(device_id, str) or find_device(device_id) is None:
+        return None, {"ok": False, "error": "unknown device id"}
+    if not isinstance(category, str) or not category:
+        return None, {"ok": False, "error": "missing category"}
+    if group_id is None or isinstance(group_id, (dict, list)):
+        return None, {"ok": False, "error": "missing group id"}
+    return (device_id, category, str(group_id)), None
+
+
+def handle_scheddel(request):
+    target, error_reply = _schedule_target(request)
+    if target is None or error_reply is not None:
+        return error_reply or {"ok": False, "error": "bad schedule target"}
+    device_id, category, group_id = target
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+    url = "/v1.0/devices/%s/timers/categories/%s/groups/%s" % (device_id, category, group_id)
+    _, error = _cloud_reply(cloud, url, "DELETE")
+    if error is not None:
+        return {"ok": False, "error": error}
+    return {"ok": True}
+
+
+def handle_schedtoggle(request):
+    target, error_reply = _schedule_target(request)
+    if target is None or error_reply is not None:
+        return error_reply or {"ok": False, "error": "bad schedule target"}
+    device_id, category, group_id = target
+    enable = request.get("enable")
+    if not isinstance(enable, bool):
+        return {"ok": False, "error": "enable must be true or false"}
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+    url = "/v1.0/devices/%s/timers/categories/%s/groups/%s/status" % (
+        device_id, category, group_id
+    )
+    _, error = _cloud_reply(cloud, url, "PUT", {"status": 1 if enable else 0})
+    if error is not None:
+        return {"ok": False, "error": error}
+    return {"ok": True}
+
+
 def dispatch(request):
     cmd = request.get("cmd")
     if cmd == "ping":
@@ -807,6 +1043,14 @@ def dispatch(request):
         return handle_cloudsync()
     if cmd == "cloudstatus":
         return handle_cloudstatus(request)
+    if cmd == "schedules":
+        return handle_schedules(request)
+    if cmd == "schedadd":
+        return handle_schedadd(request)
+    if cmd == "scheddel":
+        return handle_scheddel(request)
+    if cmd == "schedtoggle":
+        return handle_schedtoggle(request)
     if cmd == "specs":
         return handle_specs(request)
     if cmd == "config":

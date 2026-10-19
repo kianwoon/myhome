@@ -723,6 +723,10 @@ struct DeviceDetailView: View {
 
                 Divider()
 
+                ScheduleSection(device: device)
+
+                Divider()
+
                 HStack {
                     Text("All DPS")
                         .font(.headline)
