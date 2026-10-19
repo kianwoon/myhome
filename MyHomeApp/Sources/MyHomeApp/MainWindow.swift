@@ -174,9 +174,12 @@ struct DeviceCard: View {
                     .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(device.name)
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(device.name)
+                            .font(.callout.weight(.semibold))
+                            .lineLimit(1)
+                        CloudStatusBadge(online: store.cloudOnline[device.id])
+                    }
                     Text(summary(state))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -216,6 +219,31 @@ struct DeviceCard: View {
         .opacity(isEnabled ? 1 : 0.55)
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onTapGesture(perform: onSelect)
+    }
+}
+
+/// General rule: LOCAL reachability and CLOUD connectivity are independent
+/// facts, so this badge sits beside the name rather than replacing the local
+/// offline summary; both are needed to tell "asleep on LAN" from "radio dead".
+struct CloudStatusBadge: View {
+    let online: Bool?
+
+    private var label: String { DeviceStore.cloudBadgeText(online) }
+
+    private var tint: Color {
+        switch online {
+        case .some(true): return .green
+        case .some(false): return .red
+        case .none: return .secondary
+        }
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .help(online == nil ? "Cloud status pending" : "Tuya cloud connectivity")
     }
 }
 
@@ -536,8 +564,11 @@ struct DeviceDetailView: View {
                         .frame(width: 46)
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(device.name)
-                            .font(.title2.bold())
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(device.name)
+                                .font(.title2.bold())
+                            CloudStatusBadge(online: store.cloudOnline[device.id])
+                        }
                         Text("\(device.kind.label) · \(device.category.isEmpty ? "uncategorised" : device.category)")
                             .font(.callout)
                             .foregroundStyle(.secondary)

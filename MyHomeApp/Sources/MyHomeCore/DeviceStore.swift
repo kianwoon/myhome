@@ -37,13 +37,28 @@ public final class DeviceStore: ObservableObject {
     /// One full sync every 30 status cycles (~5 minutes).
     public static let cloudSyncInterval = 30
 
+    /// General rule: LOCAL reachability and CLOUD connectivity are independent
+    /// facts, so both are surfaced. Cloud status changes slowly — poll it on
+    /// the same slow cycle as cloudsync, never on the 10s status cycle.
+    public static let cloudStatusPollCycles = cloudSyncInterval
+
     @Published public private(set) var devices: [Device] = []
     @Published public private(set) var isOn: [String: Bool] = [:]
     @Published public private(set) var dpsById: [String: [String: DPSValue]] = [:]
+    @Published public private(set) var cloudOnline: [String: Bool] = [:]
     @Published public private(set) var statusLoading: Set<String> = []
     @Published public private(set) var statusErrors: [String: String] = [:]
     @Published public private(set) var errorText: String?
     @Published public private(set) var isWorking = false
+
+    /// Badge text for the independent cloud-connect fact; nil = not fetched.
+    public nonisolated static func cloudBadgeText(_ online: Bool?) -> String {
+        switch online {
+        case .some(true): return "☁ online"
+        case .some(false): return "☁ offline"
+        case .none: return "☁ …"
+        }
+    }
 
     private let bridge: any BridgeSending
     private var loadedStatus: Set<String> = []
@@ -161,9 +176,10 @@ public final class DeviceStore: ObservableObject {
         while !Task.isCancelled {
             await pollCycle()
             cyclesSinceCloudSync += 1
-            if cyclesSinceCloudSync >= Self.cloudSyncInterval {
+            if cyclesSinceCloudSync >= Self.cloudStatusPollCycles {
                 cyclesSinceCloudSync = 0
                 await cloudSync()
+                await refreshCloudStatus()
             }
             do {
                 try await Task.sleep(nanoseconds: UInt64(Self.statusPollInterval * 1_000_000_000))
@@ -261,6 +277,19 @@ public final class DeviceStore: ObservableObject {
             await refresh()
         } catch {
             errorText = error.localizedDescription
+        }
+    }
+
+    /// Slow-cycle companion to cloudSync: refreshes the cloud connect map that
+    /// the card and detail badges read. Failures leave prior values intact.
+    public func refreshCloudStatus() async {
+        do {
+            let reply = try await bridge.request(["cmd": "cloudstatus"], timeout: 90)
+            guard reply["ok"] as? Bool == true, let raw = reply["status"] else { return }
+            let data = try JSONSerialization.data(withJSONObject: raw)
+            cloudOnline = try JSONDecoder().decode([String: Bool].self, from: data)
+        } catch {
+            // Keep the last known cloud state; the badge stays neutral if none.
         }
     }
 

@@ -12,6 +12,8 @@ Requests:
     {"cmd":"set","id":"<device-id>","dps":{...}}
     {"cmd":"rescan"}
     {"cmd":"cloudsync"}
+    {"cmd":"cloudstatus"}
+    {"cmd":"cloudstatus","id":"<device-id>"}
     {"cmd":"specs"}
     {"cmd":"specs","id":"<device-id>"}
 """
@@ -394,6 +396,48 @@ def handle_specs(request):
     return {"ok": True, "updated": updated}
 
 
+def handle_cloudstatus(request):
+    """Report each device's Tuya cloud connect status (bulk, or one id).
+
+    General rule: LOCAL reachability (known ip, LAN status) and CLOUD
+    connectivity are independent facts; the UI must show both so "asleep on
+    LAN", "radio dead", and "other property" are distinguishable. Cloud status
+    changes slowly, so this is only requested on the slow cloud-sync cycle.
+    """
+    device_id = request.get("id")
+    if device_id is not None and not isinstance(device_id, str):
+        return {"ok": False, "error": "bad device id"}
+
+    if device_id is not None:
+        targets = [config for config in _devices if config.get("id") == device_id]
+        if not targets:
+            return {"ok": False, "error": "unknown device id"}
+    else:
+        targets = list(_devices)
+
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+
+    status = {}
+    failures = 0
+    for config in targets:
+        try:
+            online = cloud.getconnectstatus(config.get("id"))
+        except Exception:
+            failures += 1
+            continue
+        if isinstance(online, bool):
+            status[config.get("id")] = online
+        else:
+            failures += 1
+
+    if not status and failures > 0:
+        return {"ok": False, "error": "cloud status failed"}
+    return {"ok": True, "status": status}
+
+
 def dispatch(request):
     cmd = request.get("cmd")
     if cmd == "ping":
@@ -414,6 +458,8 @@ def dispatch(request):
         return handle_rescan()
     if cmd == "cloudsync":
         return handle_cloudsync()
+    if cmd == "cloudstatus":
+        return handle_cloudstatus(request)
     if cmd == "specs":
         return handle_specs(request)
     return {"ok": False, "error": "unknown command"}
