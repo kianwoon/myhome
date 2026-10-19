@@ -240,9 +240,14 @@ struct CloudStatusBadge: View {
 
     var body: some View {
         Text(label)
-            .font(.caption2.weight(.medium))
+            // General rule: a view must never mutate observable state during
+            // layout, and content that changes width per poll re-invalidates
+            // layout. Fixed monospaced geometry keeps this badge's size
+            // identical across pending/online/offline updates.
+            .font(.system(.caption2, design: .monospaced).weight(.medium))
             .foregroundStyle(tint)
             .lineLimit(1)
+            .frame(width: 68, alignment: .leading)
             .help(online == nil ? "Cloud status pending" : "Tuya cloud connectivity")
     }
 }

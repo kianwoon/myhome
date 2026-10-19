@@ -190,17 +190,63 @@ public final class DeviceStore: ObservableObject {
     }
 
     /// Round-robin over online devices only; skip anything already in flight.
+    ///
+    /// General rule: a view must NEVER mutate observable state while it is
+    /// being laid out. Polling therefore coalesces its results and writes each
+    /// @Published collection ONCE per cycle instead of per device — per-device
+    /// writes invalidate layout repeatedly and can feed a layout loop.
     private func pollCycle() async {
-        for device in devices where device.hasAddress {
-            if Task.isCancelled { return }
-            if statusLoading.contains(device.id) { continue }
-            await loadStatus(for: device, force: true)
+        let targets = devices
+            .filter { $0.hasAddress && !statusLoading.contains($0.id) }
+            .map(\.id)
+        guard !targets.isEmpty else { return }
+
+        var dpsBatch: [String: [String: DPSValue]] = [:]
+        var onBatch: [String: Bool] = [:]
+        var errorBatch: [String: String] = [:]
+
+        for id in targets {
+            if Task.isCancelled { break }
+            switch await fetchStatus(for: id) {
+            case .success(let decoded):
+                dpsBatch[id] = decoded
+                if let power = decoded["1"]?.boolValue {
+                    onBatch[id] = power
+                }
+            case .failure(let message):
+                errorBatch[id] = message
+            }
             do {
                 try await Task.sleep(nanoseconds: UInt64(Self.statusPollPacing * 1_000_000_000))
             } catch {
                 return
             }
         }
+
+        applyPollBatch(dps: dpsBatch, on: onBatch, errors: errorBatch)
+    }
+
+    /// Single coalesced write for one poll cycle: each published collection is
+    /// assigned once, so SwiftUI sees one invalidation rather than dozens.
+    private func applyPollBatch(
+        dps: [String: [String: DPSValue]],
+        on: [String: Bool],
+        errors: [String: String]
+    ) {
+        guard !dps.isEmpty || !errors.isEmpty else { return }
+        if !dps.isEmpty {
+            dpsById.merge(dps) { _, new in new }
+            isOn.merge(on) { _, new in new }
+            loadedStatus.formUnion(dps.keys)
+        }
+        var mergedErrors = statusErrors
+        for id in dps.keys {
+            mergedErrors[id] = nil
+        }
+        for (id, message) in errors {
+            mergedErrors[id] = message
+        }
+        statusErrors = mergedErrors
     }
 
     // MARK: - Status
@@ -215,19 +261,31 @@ public final class DeviceStore: ObservableObject {
         statusLoading.insert(device.id)
         defer { statusLoading.remove(device.id) }
 
+        switch await fetchStatus(for: device.id) {
+        case .success(let decoded):
+            applyStatus(device.id, decoded: decoded)
+        case .failure(let message):
+            statusErrors[device.id] = message
+        }
+    }
+
+    private enum StatusFetch {
+        case success([String: DPSValue])
+        case failure(String)
+    }
+
+    private func fetchStatus(for id: String) async -> StatusFetch {
         do {
-            let reply = try await bridge.request(["cmd": "status", "id": device.id])
+            let reply = try await bridge.request(["cmd": "status", "id": id])
             guard reply["ok"] as? Bool == true else {
-                statusErrors[device.id] = reply["error"] as? String ?? "Status failed."
-                return
+                return .failure(reply["error"] as? String ?? "Status failed.")
             }
             guard let raw = reply["dps"] else {
-                statusErrors[device.id] = "Device returned no dps."
-                return
+                return .failure("Device returned no dps.")
             }
-            try applyStatus(device.id, raw: raw)
+            return .success(try Self.decodeDps(raw))
         } catch {
-            statusErrors[device.id] = error.localizedDescription
+            return .failure(error.localizedDescription)
         }
     }
 
@@ -293,8 +351,7 @@ public final class DeviceStore: ObservableObject {
         }
     }
 
-    private func applyStatus(_ id: String, raw: Any) throws {
-        let decoded = try Self.decodeDps(raw)
+    private func applyStatus(_ id: String, decoded: [String: DPSValue]) {
         dpsById[id] = decoded
         statusErrors[id] = nil
         loadedStatus.insert(id)
@@ -391,7 +448,7 @@ public final class DeviceStore: ObservableObject {
     /// reply carries no dps the optimistic value is left in place.
     private func applyConfirmedReply(_ id: String, reply: [String: Any]) throws {
         guard let raw = reply["dps"] else { return }
-        try applyStatus(id, raw: raw)
+        applyStatus(id, decoded: try Self.decodeDps(raw))
     }
 
     private func revert(device: Device, isOn previousOn: Bool, dps previousDps: [String: DPSValue]?) {
