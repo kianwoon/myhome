@@ -21,6 +21,7 @@ struct SpecControlsView: View {
             }
         }
     }
+
 }
 
 private struct CapabilityRow: View {

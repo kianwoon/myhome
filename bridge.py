@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 
 import tinytuya
 
@@ -30,6 +31,31 @@ DEVICES_PATH = os.path.join(BASE_DIR, "devices.json")
 CREDENTIALS_PATH = os.path.join(BASE_DIR, "tinytuya.json")
 
 SOCKET_TIMEOUT = 5
+
+# Consecutive cloudsync cycles a device may be missing from the cloud report
+# before it is pruned from the roster (~2 cycles x 5 min = 10 min of confirmed
+# absence, which filters transient/partial cloud API responses).
+pruneAfterMissedSyncs = 2
+
+# UDP listen window for an auto-heal scan, and the single-flight guard that
+# keeps at most one background heal running per bridge process.
+autohealScanWindow = 35
+_autoheal_lock = threading.Lock()
+_autoheal_running = False
+
+# Fields the cloud is authoritative for: device IDENTITY AND CREDENTIALS.
+# Local-only fields (ip, version, spec) are never touched by cloudsync.
+CLOUD_IDENTITY_FIELDS = (
+    "name",
+    "key",
+    "category",
+    "mac",
+    "uuid",
+    "model",
+    "product_id",
+    "product_name",
+    "icon",
+)
 
 # Device objects keyed by device id; reused so persistent sockets are shared.
 _device_cache = {}
@@ -223,11 +249,13 @@ def handle_rescan():
 def handle_cloudsync():
     """Re-sync device identity from the Tuya cloud.
 
-    General rule: device IDENTITY (names, roster membership) is
-    cloud-authoritative data and must re-sync on a schedule, just as STATUS
-    is device-authoritative and re-syncs via polling. Local ip/version/key
-    fields always win and are preserved; cloud-absent ids are marked, never
-    deleted. Credentials are read from tinytuya.json and never echoed.
+    General rule: the cloud roster is the authority for device IDENTITY AND
+    CREDENTIALS. cloudsync merges every identity/credential field the cloud
+    provides (CLOUD_IDENTITY_FIELDS) onto the local entry, preserving only
+    local-only fields (ip, version, spec), and prunes entries the cloud no
+    longer reports. Absence is confirmed with a missedSyncs counter so a
+    transient/partial cloud response cannot delete a device. Credentials in
+    tinytuya.json are never echoed.
     """
     try:
         cloud = make_cloud()
@@ -240,13 +268,14 @@ def handle_cloudsync():
         return {"ok": False, "error": "cloud sync failed: empty or unexpected response"}
 
     # General rule: shared mutable state — apply only this command's
-    # name/roster delta to a fresh read; never dump the serving cache.
+    # identity/roster delta to a fresh read; never dump the serving cache.
     renamed = 0
     added = 0
+    pruned = 0
     seen = set()
 
     def merge(fresh):
-        nonlocal renamed, added
+        nonlocal renamed, added, pruned
         by_id = {config.get("id"): config for config in fresh}
         for cloud_device in result:
             if not isinstance(cloud_device, dict):
@@ -270,28 +299,160 @@ def handle_cloudsync():
                 fresh.append(config)
                 by_id[device_id] = config
                 added += 1
-                continue
 
             config["cloud"] = True
-            if name and config.get("name") != name:
-                config["name"] = name
-                renamed += 1
+            config["missedSyncs"] = 0
+            for field in CLOUD_IDENTITY_FIELDS:
+                value = cloud_device.get(field)
+                if value is None or value == "":
+                    continue
+                if config.get(field) != value:
+                    config[field] = value
+                    if field == "name":
+                        renamed += 1
 
+        drop = set()
         for config in fresh:
-            if config.get("id") not in seen:
-                config["cloud"] = False
+            if config.get("id") in seen:
+                continue
+            config["cloud"] = False
+            missed = config.get("missedSyncs", 0)
+            try:
+                missed = int(missed)
+            except (TypeError, ValueError):
+                missed = 0
+            missed += 1
+            config["missedSyncs"] = missed
+            if missed >= pruneAfterMissedSyncs:
+                drop.add(config.get("id"))
+        if drop:
+            fresh[:] = [config for config in fresh if config.get("id") not in drop]
+            pruned = len(drop)
 
     try:
         merged_devices = apply_to_disk(merge)
     except Exception as exc:
         return {"ok": False, "error": "devices write failed: " + type(exc).__name__}
 
+    # Do not block the serial stdio protocol on a 35s LAN scan.
+    start_autoheal(cloud)
+
     return {
         "ok": True,
         "renamed": renamed,
         "added": added,
+        "pruned": pruned,
         "total": len(merged_devices),
     }
+
+
+def autoheal(cloud):
+    """Wake and re-acquire cloud-known devices that have no LAN address.
+
+    General rule: the roster self-heals — a device known to the cloud but
+    absent from the LAN is not "broken", it is asleep. Send it a safe no-op
+    command (same boolean dp, same value) to wake the radio, then run ONE
+    broadcast scan and merge the discovered ip/version back into the roster.
+    Devices that still do not answer keep missing syncs and prune per
+    pruneAfterMissedSyncs; no special casing.
+    """
+    woke = 0
+    found = 0
+    try:
+        roster = load_devices()
+    except Exception:
+        return {"woke": 0, "found": 0}
+
+    candidates = [
+        config for config in roster
+        if not config.get("ip") and config.get("cloud", True) is not False
+    ]
+    for config in candidates:
+        device_id = config.get("id")
+        if not device_id:
+            continue
+        try:
+            status = cloud.getstatus(device_id)
+        except Exception:
+            continue
+        if not isinstance(status, dict) or status.get("Error") or status.get("Err"):
+            continue
+        points = status.get("status")
+        if not isinstance(points, list):
+            continue
+        nudge = None
+        for point in points:
+            if not isinstance(point, dict):
+                continue
+            if isinstance(point.get("value"), bool) and point.get("code"):
+                nudge = {"code": point["code"], "value": point["value"]}
+                break
+        if nudge is None:
+            continue
+        try:
+            cloud.sendcommand(device_id, [nudge])
+            woke += 1
+        except Exception:
+            continue
+
+    if not candidates:
+        return {"woke": 0, "found": 0}
+
+    try:
+        scan = tinytuya.deviceScan(
+            poll=False, color=False, maxretry=autohealScanWindow, byID=True
+        )
+    except Exception:
+        scan = {}
+    if not isinstance(scan, dict):
+        scan = {}
+
+    def merge(fresh):
+        nonlocal found
+        by_id = {config.get("id"): config for config in fresh}
+        for device_id, device in scan.items():
+            config = by_id.get(device_id)
+            if config is None or not isinstance(device, dict):
+                continue
+            changed = False
+            if device.get("ip") and config.get("ip") != device["ip"]:
+                config["ip"] = device["ip"]
+                changed = True
+            if device.get("version") and config.get("version") != device["version"]:
+                config["version"] = device["version"]
+                changed = True
+            if changed:
+                found += 1
+
+    try:
+        apply_to_disk(merge)
+    except Exception:
+        return {"woke": woke, "found": 0}
+    if found:
+        _device_cache.clear()
+    return {"woke": woke, "found": found}
+
+
+def start_autoheal(cloud):
+    """Spawn at most one background autoheal run; never block the caller."""
+    global _autoheal_running
+    with _autoheal_lock:
+        if _autoheal_running:
+            return False
+        _autoheal_running = True
+
+    def run():
+        global _autoheal_running
+        try:
+            autoheal(cloud)
+        except Exception:
+            pass
+        finally:
+            with _autoheal_lock:
+                _autoheal_running = False
+
+    threading.Thread(target=run, name="autoheal", daemon=True).start()
+    return True
 
 
 def make_cloud():

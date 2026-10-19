@@ -157,6 +157,7 @@ public final class DeviceStore: ObservableObject {
     /// Reference-counted so the menu extra and the main window can each keep
     /// polling alive independently.
     public func startPolling() {
+        if ProcessInfo.processInfo.environment["MYHOME_NOPOLL"] == "1" { return }
         pollObservers += 1
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
@@ -173,8 +174,10 @@ public final class DeviceStore: ObservableObject {
     }
 
     private func pollLoop() async {
+        let single = ProcessInfo.processInfo.environment["MYHOME_SINGLEPOLL"] == "1"
         while !Task.isCancelled {
             await pollCycle()
+            if single { return }
             cyclesSinceCloudSync += 1
             if cyclesSinceCloudSync >= Self.cloudStatusPollCycles {
                 cyclesSinceCloudSync = 0

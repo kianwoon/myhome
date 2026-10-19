@@ -47,6 +47,9 @@ struct DashboardView: View {
     @EnvironmentObject private var store: DeviceStore
     @State private var group: DeviceGroup = .fans
     @State private var selectedID: String?
+    // Which category's button started the current rescan (drives the spinner).
+    // Local view state only; the working flag itself stays store.isWorking.
+    @State private var rescanningGroup: DeviceGroup?
 
     private var filtered: [Device] {
         store.devices.filter { group.contains($0) }
@@ -59,8 +62,7 @@ struct DashboardView: View {
     var body: some View {
         NavigationSplitView {
             List(DeviceGroup.allCases, selection: $group) { item in
-                Label(item.title, systemImage: item.icon)
-                    .badge(store.devices.filter { item.contains($0) }.count)
+                sidebarRow(item)
                     .tag(item)
             }
             .navigationSplitViewColumnWidth(min: 150, ideal: 175)
@@ -118,6 +120,49 @@ struct DashboardView: View {
         }
         .onAppear { store.startPolling() }
         .onDisappear { store.stopPolling() }
+    }
+
+    @ViewBuilder
+    private func sidebarRow(_ item: DeviceGroup) -> some View {
+        HStack(spacing: 6) {
+            Label(item.title, systemImage: item.icon)
+                .badge(store.devices.filter { item.contains($0) }.count)
+            Spacer(minLength: 0)
+            CategoryRefreshButton(item: item, active: rescanningGroup) {
+                rescanningGroup = item
+                Task {
+                    await store.rescan()
+                    rescanningGroup = nil
+                }
+            }
+        }
+    }
+}
+
+/// General rule: every sidebar category header refreshes the roster through the
+/// SAME store.rescan() flow — there is one scan path, never a per-section copy.
+/// While a rescan runs, the clicked header shows a spinner and every refresh
+/// button disables via the shared store.isWorking flag.
+struct CategoryRefreshButton: View {
+    @EnvironmentObject private var store: DeviceStore
+    let item: DeviceGroup
+    let active: DeviceGroup?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            if store.isWorking && active == item {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(store.isWorking)
+        .help("Rescan devices")
     }
 }
 
