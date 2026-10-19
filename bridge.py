@@ -19,6 +19,7 @@ Requests:
 import json
 import os
 import sys
+import tempfile
 
 import tinytuya
 
@@ -41,6 +42,41 @@ def load_devices():
     if isinstance(data, dict):
         data = data.get("devices", [])
     return data if isinstance(data, list) else []
+
+
+def apply_to_disk(mutator):
+    """Read-modify-write devices.json and refresh the serving cache.
+
+    General rule: devices.json is SHARED MUTABLE STATE across independent
+    bridge processes. No writer may dump its in-memory roster; every write
+    re-reads the file, applies only that command's field-level delta to the
+    fresh copy (by id), and writes that back. The write is atomic: a temp file
+    in the same directory followed by os.replace.
+    """
+    global _devices
+    fresh = load_devices()
+    mutator(fresh)
+
+    directory = os.path.dirname(DEVICES_PATH) or "."
+    descriptor, temp_path = tempfile.mkstemp(
+        prefix=".devices-", suffix=".json", dir=directory
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(fresh, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, DEVICES_PATH)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+    _devices = fresh
+    return fresh
 
 
 def find_device(device_id):
@@ -146,24 +182,33 @@ def handle_rescan():
     scan = tinytuya.deviceScan(poll=False, color=False)
     if not isinstance(scan, dict):
         scan = {}
-    by_id = {config.get("id"): config for config in _devices}
+
+    # General rule: shared mutable state — never dump _devices; merge only the
+    # scan delta into a fresh read via apply_to_disk.
     merged = 0
-    for device_id, found in scan.items():
-        config = by_id.get(device_id)
-        if config is None or not isinstance(found, dict):
-            continue
-        changed = False
-        if found.get("ip") and config.get("ip") != found["ip"]:
-            config["ip"] = found["ip"]
-            changed = True
-        if found.get("version") and config.get("version") != found["version"]:
-            config["version"] = found["version"]
-            changed = True
-        if changed:
-            merged += 1
-    with open(DEVICES_PATH, "w", encoding="utf-8") as handle:
-        json.dump(_devices, handle, indent=2)
-        handle.write("\n")
+
+    def merge(fresh):
+        nonlocal merged
+        by_id = {config.get("id"): config for config in fresh}
+        for device_id, found in scan.items():
+            config = by_id.get(device_id)
+            if config is None or not isinstance(found, dict):
+                continue
+            changed = False
+            if found.get("ip") and config.get("ip") != found["ip"]:
+                config["ip"] = found["ip"]
+                changed = True
+            if found.get("version") and config.get("version") != found["version"]:
+                config["version"] = found["version"]
+                changed = True
+            if changed:
+                merged += 1
+
+    try:
+        apply_to_disk(merge)
+    except Exception as exc:
+        return {"ok": False, "error": "devices write failed: " + type(exc).__name__}
+
     # Addresses may have moved, so drop cached sockets.
     _device_cache.clear()
     return {"ok": True, "merged": merged}
@@ -188,51 +233,58 @@ def handle_cloudsync():
     if not isinstance(result, list) or not result:
         return {"ok": False, "error": "cloud sync failed: empty or unexpected response"}
 
-    by_id = {config.get("id"): config for config in _devices}
+    # General rule: shared mutable state — apply only this command's
+    # name/roster delta to a fresh read; never dump the serving cache.
     renamed = 0
     added = 0
     seen = set()
 
-    for cloud_device in result:
-        if not isinstance(cloud_device, dict):
-            continue
-        device_id = cloud_device.get("id")
-        if not device_id:
-            continue
-        seen.add(device_id)
-        name = cloud_device.get("name")
-        config = by_id.get(device_id)
-        if config is None:
-            _devices.append({
-                "id": device_id,
-                "name": name or device_id,
-                "ip": "",
-                "version": None,
-                "category": cloud_device.get("category", ""),
-                "key": "",
-                "cloud": True,
-            })
-            added += 1
-            continue
+    def merge(fresh):
+        nonlocal renamed, added
+        by_id = {config.get("id"): config for config in fresh}
+        for cloud_device in result:
+            if not isinstance(cloud_device, dict):
+                continue
+            device_id = cloud_device.get("id")
+            if not device_id:
+                continue
+            seen.add(device_id)
+            name = cloud_device.get("name")
+            config = by_id.get(device_id)
+            if config is None:
+                config = {
+                    "id": device_id,
+                    "name": name or device_id,
+                    "ip": "",
+                    "version": None,
+                    "category": cloud_device.get("category", ""),
+                    "key": "",
+                    "cloud": True,
+                }
+                fresh.append(config)
+                by_id[device_id] = config
+                added += 1
+                continue
 
-        config["cloud"] = True
-        if name and config.get("name") != name:
-            config["name"] = name
-            renamed += 1
+            config["cloud"] = True
+            if name and config.get("name") != name:
+                config["name"] = name
+                renamed += 1
 
-    for config in _devices:
-        if config.get("id") not in seen:
-            config["cloud"] = False
+        for config in fresh:
+            if config.get("id") not in seen:
+                config["cloud"] = False
 
-    with open(DEVICES_PATH, "w", encoding="utf-8") as handle:
-        json.dump(_devices, handle, indent=2)
-        handle.write("\n")
+    try:
+        merged_devices = apply_to_disk(merge)
+    except Exception as exc:
+        return {"ok": False, "error": "devices write failed: " + type(exc).__name__}
 
     return {
         "ok": True,
         "renamed": renamed,
         "added": added,
-        "total": len(_devices),
+        "total": len(merged_devices),
     }
 
 
@@ -303,6 +355,7 @@ def handle_specs(request):
 
     updated = 0
     failures = 0
+    fetched_specs = {}
     for config in targets:
         if device_id is None and config.get("spec") and not request.get("refresh"):
             continue
@@ -312,15 +365,25 @@ def handle_specs(request):
             failures += 1
             continue
         if spec:
-            config["spec"] = spec
+            fetched_specs[config.get("id")] = spec
             updated += 1
         else:
             failures += 1
 
-    if updated:
-        with open(DEVICES_PATH, "w", encoding="utf-8") as handle:
-            json.dump(_devices, handle, indent=2)
-            handle.write("\n")
+    if fetched_specs:
+        # General rule: shared mutable state — merge only the spec delta by id
+        # into a fresh read; never dump the serving cache.
+        def merge(fresh):
+            by_id = {config.get("id"): config for config in fresh}
+            for target_id, spec in fetched_specs.items():
+                target = by_id.get(target_id)
+                if target is not None:
+                    target["spec"] = spec
+
+        try:
+            apply_to_disk(merge)
+        except Exception as exc:
+            return {"ok": False, "error": "devices write failed: " + type(exc).__name__}
 
     if updated == 0 and failures > 0:
         return {"ok": False, "error": "spec fetch failed"}
