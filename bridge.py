@@ -18,6 +18,7 @@ Requests:
     {"cmd":"schedules","id":"<device-id>"}
     {"cmd":"schedadd","id":"<device-id>","name":"...","days":[1,0,1,0,1,0,0],"time":"HH:MM","on":true}
     {"cmd":"scheddel","id":"<device-id>","category":"...","group_id":"..."}
+    {"cmd":"schededit","id":"<device-id>","category":"...","group_id":"...","name"?,"days"?,"time"?,"on"?}
     {"cmd":"schedtoggle","id":"<device-id>","category":"...","group_id":"...","enable":true}
     {"cmd":"codemap"}
     {"cmd":"codemap","id":"<device-id>"}
@@ -1164,6 +1165,199 @@ def _timer_group_status(group):
     return observed
 
 
+def _timer_group_timer(group, index=0):
+    """Return a timer dict (nested or instruct-shaped) from a group."""
+    timers = group.get("timers") if isinstance(group, dict) else None
+    if isinstance(timers, list) and len(timers) > index and isinstance(timers[index], dict):
+        return timers[index]
+    instruct = group.get("instruct") if isinstance(group, dict) else None
+    if isinstance(instruct, list) and len(instruct) > index and isinstance(instruct[index], dict):
+        return instruct[index]
+    return {}
+
+
+def _schema_by_code(config):
+    spec = config.get("spec") if isinstance(config, dict) else None
+    by_code = {}
+    if isinstance(spec, dict):
+        for entry in spec.values():
+            if isinstance(entry, dict) and isinstance(entry.get("code"), str):
+                by_code[entry["code"]] = entry
+    return by_code
+
+
+def _schedule_value_for(spec_entry, on):
+    """Map an ON/OFF edit to the instruction value for a code's type."""
+    declared = ""
+    if isinstance(spec_entry, dict):
+        declared = str(spec_entry.get("type") or "").lower()
+    if declared == "boolean":
+        return bool(on)
+    if declared == "enum":
+        return "open" if on else "close"
+    return bool(on)
+
+
+def _schedule_value_matches(raw, expected):
+    if isinstance(expected, bool):
+        if isinstance(raw, bool):
+            return raw == expected
+        if isinstance(raw, (int, float)):
+            return bool(raw) == expected
+        if isinstance(raw, str):
+            return (raw.strip().lower() in _BOOLEAN_TRUE) == expected
+        return False
+    if isinstance(raw, str) and isinstance(expected, str):
+        return raw.strip().lower() == expected.strip().lower()
+    return raw == expected
+
+
+def handle_schededit(request):
+    """Edit one timer group's content without changing its enabled state."""
+    target, error_reply = _schedule_target(request)
+    if target is None or error_reply is not None:
+        return error_reply or {"ok": False, "error": "bad schedule target"}
+    device_id, category, group_id = target
+    config = find_device(device_id) or {}
+    name = request.get("name")
+    if name is not None and not isinstance(name, str):
+        return {"ok": False, "error": "bad name"}
+    days = request.get("days")
+    if days is not None:
+        if not isinstance(days, list) or len(days) != 7:
+            return {"ok": False, "error": "days must be 7 entries (Mon..Sun)"}
+        loops = "".join("1" if day else "0" for day in days)
+    else:
+        loops = None
+    clock = request.get("time")
+    if clock is not None:
+        if not isinstance(clock, str) or not re.match(r"^\d{2}:\d{2}$", clock):
+            return {"ok": False, "error": "time must be HH:MM"}
+        hour, minute = int(clock[:2]), int(clock[3:])
+        if hour > 23 or minute > 59:
+            return {"ok": False, "error": "time must be HH:MM"}
+    on = request.get("on")
+    if on is not None and not isinstance(on, bool):
+        return {"ok": False, "error": "on must be true or false"}
+    if name is None and loops is None and clock is None and on is None:
+        return {"ok": False, "error": "nothing to edit"}
+    try:
+        cloud = make_cloud()
+    except Exception as exc:
+        return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
+    read_url = "/v1.0/devices/%s/timers/categories/%s" % (device_id, category)
+    result, error = _cloud_reply(cloud, read_url)
+    if error is not None:
+        return {"ok": False, "error": error}
+    group, _ = _find_timer_group(result, group_id)
+    if group is None:
+        result, error = _cloud_reply(cloud, "/v1.0/devices/%s/timers" % device_id)
+        if error is not None:
+            return {"ok": False, "error": error}
+        group, _ = _find_timer_group(result, group_id)
+    if group is None:
+        return {"ok": False, "error": "schedule not found"}
+
+    spec_by_code = _schema_by_code(config)
+    timers = group.get("timers")
+    source = timers if isinstance(timers, list) and timers else None
+    if source is None:
+        source = [group]
+    instruct = []
+    expected = {"time": clock, "loops": loops, "name": name, "value": None}
+    first_function = None
+    for index, timer in enumerate(source):
+        if not isinstance(timer, dict):
+            continue
+        functions = timer.get("functions")
+        if not isinstance(functions, list):
+            functions = []
+        rebuilt = []
+        for fn_index, fn in enumerate(functions):
+            if not isinstance(fn, dict):
+                continue
+            code = fn.get("code")
+            value = fn.get("value")
+            if index == 0 and fn_index == 0 and on is not None:
+                value = _schedule_value_for(spec_by_code.get(str(code or "")), on)
+            rebuilt.append({"code": code, "value": value})
+        if index == 0 and rebuilt:
+            first_function = rebuilt[0]
+        instruct.append({
+            "time": clock if clock is not None else str(timer.get("time") or group.get("time") or ""),
+            "functions": rebuilt,
+            "status": timer.get("status", group.get("status", 0)),
+        })
+    if not instruct:
+        return {"ok": False, "error": "schedule has no instructions"}
+    if on is not None and first_function is not None:
+        expected["value"] = first_function.get("value")
+    current_alias = name
+    if current_alias is None:
+        current_alias = _timer_group_timer(group).get("alias_name", group.get("alias_name", ""))
+    offset, timezone_id = _system_timezone()
+    body = {
+        "category": category,
+        "loops": loops if loops is not None else str(group.get("loops") or "1111111"),
+        "time_zone": offset,
+        "timezone_id": timezone_id,
+        "instruct": instruct,
+    }
+    if isinstance(current_alias, str):
+        body["alias_name"] = current_alias
+    update_url = "/v1.0/devices/%s/timers/groups/%s" % (device_id, group_id)
+    _, error = _cloud_reply(cloud, update_url, "PUT", body)
+    if error is not None:
+        return {"ok": False, "error": error}
+
+    readback, error = _cloud_reply(cloud, read_url)
+    if error is not None:
+        return {"ok": False, "error": error}
+    current, _ = _find_timer_group(readback, group_id)
+    if current is None:
+        return {"ok": False, "error": "edit did not take effect"}
+    timer = _timer_group_timer(current)
+    if not timer:
+        return {"ok": False, "error": "edit did not take effect"}
+    # The group-update PUT can reset a disabled timer to enabled; editing must
+    # not change the enabled state, so restore it explicitly when that happens.
+    first_timer = source[0] if isinstance(source[0], dict) else {}
+    try:
+        original_status = int(first_timer.get("status", group.get("status", 0)))
+    except (TypeError, ValueError):
+        original_status = 1 if first_timer.get("status", group.get("status", 0)) else 0
+    if _timer_group_status(current) != [original_status]:
+        legacy_url = "/v1.0/devices/%s/timers/categories/%s/groups/%s/status" % (
+            device_id, category, group_id
+        )
+        _, error = _cloud_reply(cloud, legacy_url, "PUT", {"status": original_status})
+        if error is not None:
+            return {"ok": False, "error": error}
+        readback, error = _cloud_reply(cloud, read_url)
+        if error is not None:
+            return {"ok": False, "error": error}
+        current, _ = _find_timer_group(readback, group_id)
+        if current is None:
+            return {"ok": False, "error": "edit did not take effect"}
+        timer = _timer_group_timer(current)
+        if not timer or _timer_group_status(current) != [original_status]:
+            return {"ok": False, "error": "edit did not take effect"}
+    if clock is not None and str(timer.get("time") or current.get("time") or "") != clock:
+        return {"ok": False, "error": "edit did not take effect"}
+    if loops is not None and str(timer.get("loops") or current.get("loops") or "") != loops:
+        return {"ok": False, "error": "edit did not take effect"}
+    if name is not None and str(timer.get("alias_name", current.get("alias_name", ""))) != name:
+        return {"ok": False, "error": "edit did not take effect"}
+    if on is not None:
+        observed_functions = timer.get("functions")
+        if not isinstance(observed_functions, list) or not observed_functions:
+            return {"ok": False, "error": "edit did not take effect"}
+        observed = observed_functions[0].get("value") if isinstance(observed_functions[0], dict) else None
+        if not _schedule_value_matches(observed, expected["value"]):
+            return {"ok": False, "error": "edit did not take effect"}
+    return {"ok": True}
+
+
 def handle_schedtoggle(request):
     target, error_reply = _schedule_target(request)
     if target is None or error_reply is not None:
@@ -1258,6 +1452,8 @@ def dispatch(request):
         return handle_schedadd(request)
     if cmd == "scheddel":
         return handle_scheddel(request)
+    if cmd == "schededit":
+        return handle_schededit(request)
     if cmd == "schedtoggle":
         return handle_schedtoggle(request)
     if cmd == "codemap":

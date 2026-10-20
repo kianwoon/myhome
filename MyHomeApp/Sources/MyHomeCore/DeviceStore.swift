@@ -501,6 +501,39 @@ public final class DeviceStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    public func editSchedule(
+        _ schedule: DeviceSchedule,
+        for device: Device,
+        name: String,
+        days: [Bool],
+        time: String,
+        on: Bool
+    ) async -> Bool {
+        do {
+            let reply = try await bridge.request([
+                "cmd": "schededit",
+                "id": device.id,
+                "category": schedule.category,
+                "group_id": schedule.groupId,
+                "name": name,
+                "days": days.map { $0 ? 1 : 0 },
+                "time": time,
+                "on": on
+            ], timeout: 20)
+            guard reply["ok"] as? Bool == true else {
+                schedulesError = reply["error"] as? String ?? "Could not update schedule."
+                return false
+            }
+            schedulesError = nil
+            await loadSchedules(for: device)
+            return true
+        } catch {
+            schedulesError = error.localizedDescription
+            return false
+        }
+    }
+
     public func setScheduleEnabled(_ schedule: DeviceSchedule, for device: Device, enabled: Bool) async {
         do {
             let reply = try await bridge.request([

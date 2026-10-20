@@ -5,11 +5,26 @@ import MyHomeCore
 /// Cloud-owned timer groups for the selected device. Loaded on appear and
 /// reloaded after every add/toggle/delete; the periodic status poll does not
 /// touch this list because schedules are slow-moving cloud data.
+/// What the shared add/edit sheet should present.
+private enum ScheduleSheet: Identifiable {
+    case add
+    case edit(DeviceSchedule)
+
+    var id: String {
+        switch self {
+        case .add:
+            return "add"
+        case .edit(let schedule):
+            return schedule.id
+        }
+    }
+}
+
 struct ScheduleSection: View {
     @EnvironmentObject private var store: DeviceStore
     let device: Device
 
-    @State private var showingAdd = false
+    @State private var sheet: ScheduleSheet?
     @State private var pendingDelete: DeviceSchedule?
 
     var body: some View {
@@ -21,7 +36,7 @@ struct ScheduleSection: View {
                 if store.schedulesLoading {
                     ProgressView().controlSize(.small)
                 }
-                Button("+ Add Schedule") { showingAdd = true }
+                Button("+ Add Schedule") { sheet = .add }
                     .controlSize(.small)
             }
 
@@ -39,16 +54,24 @@ struct ScheduleSection: View {
             }
 
             ForEach(store.schedules) { schedule in
-                ScheduleRow(schedule: schedule, device: device) {
-                    pendingDelete = schedule
-                }
+                ScheduleRow(
+                    schedule: schedule,
+                    device: device,
+                    onEdit: { sheet = .edit(schedule) },
+                    onDelete: { pendingDelete = schedule }
+                )
             }
         }
         .task(id: device.id) {
             await store.loadSchedules(for: device)
         }
-        .sheet(isPresented: $showingAdd) {
-            AddScheduleSheet(device: device)
+        .sheet(item: $sheet) { sheet in
+            switch sheet {
+            case .add:
+                AddScheduleSheet(device: device, schedule: nil)
+            case .edit(let schedule):
+                AddScheduleSheet(device: device, schedule: schedule)
+            }
         }
         .alert(
             "Delete schedule?",
@@ -73,6 +96,7 @@ private struct ScheduleRow: View {
     @EnvironmentObject private var store: DeviceStore
     let schedule: DeviceSchedule
     let device: Device
+    let onEdit: () -> Void
     let onDelete: () -> Void
 
     private var enabledBinding: Binding<Bool> {
@@ -143,6 +167,12 @@ private struct ScheduleRow: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
 
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
+            }
+            .buttonStyle(.borderless)
+            .help("Edit schedule")
+
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")
             }
@@ -157,11 +187,12 @@ private struct AddScheduleSheet: View {
     @EnvironmentObject private var store: DeviceStore
     @Environment(\.dismiss) private var dismiss
     let device: Device
+    let schedule: DeviceSchedule?
 
-    @State private var name = ""
-    @State private var time = Date()
-    @State private var days = Array(repeating: true, count: 7)
-    @State private var isOn = true
+    @State private var name: String
+    @State private var time: Date
+    @State private var days: [Bool]
+    @State private var isOn: Bool
     @State private var saving = false
 
     private static let formatter: DateFormatter = {
@@ -171,11 +202,31 @@ private struct AddScheduleSheet: View {
         return formatter
     }()
 
+    init(device: Device, schedule: DeviceSchedule?) {
+        self.device = device
+        self.schedule = schedule
+        _name = State(initialValue: schedule?.aliasName ?? "")
+        let initialTime = schedule.flatMap { Self.formatter.date(from: $0.time) } ?? Date()
+        _time = State(initialValue: initialTime)
+        var initialDays = Array(repeating: false, count: 7)
+        if let loops = schedule?.loops {
+            for (index, character) in loops.prefix(7).enumerated() where character == "1" {
+                initialDays[index] = true
+            }
+        } else {
+            initialDays = Array(repeating: true, count: 7)
+        }
+        _days = State(initialValue: initialDays)
+        _isOn = State(initialValue: schedule?.value ?? true)
+    }
+
+    private var isEditing: Bool { schedule != nil }
+
     private var timeText: String { Self.formatter.string(from: time) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Add Schedule")
+            Text(isEditing ? "Edit Schedule" : "Add Schedule")
                 .font(.headline)
 
             TextField("Name (optional)", text: $name)
@@ -256,7 +307,7 @@ private struct AddScheduleSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(saving ? "Adding…" : "Add", action: submit)
+                Button(saving ? "Saving…" : (isEditing ? "Save" : "Add"), action: submit)
                     .keyboardShortcut(.defaultAction)
                     .disabled(saving)
             }
@@ -269,13 +320,25 @@ private struct AddScheduleSheet: View {
         guard !saving else { return }
         saving = true
         Task {
-            let ok = await store.addSchedule(
-                for: device,
-                name: name,
-                days: days,
-                time: timeText,
-                on: isOn
-            )
+            let ok: Bool
+            if let schedule {
+                ok = await store.editSchedule(
+                    schedule,
+                    for: device,
+                    name: name,
+                    days: days,
+                    time: timeText,
+                    on: isOn
+                )
+            } else {
+                ok = await store.addSchedule(
+                    for: device,
+                    name: name,
+                    days: days,
+                    time: timeText,
+                    on: isOn
+                )
+            }
             saving = false
             if ok { dismiss() }
         }
