@@ -1079,6 +1079,91 @@ def handle_scheddel(request):
     return {"ok": True}
 
 
+def _find_timer_group(result, group_id):
+    """Find a timer group by id across the categories in a timers reply.
+
+    The full timers list is a list of category entries; a category-scoped
+    read returns a single dict with the same entry shape.
+    """
+    if isinstance(result, dict):
+        entries = [result]
+    elif isinstance(result, list):
+        entries = result
+    else:
+        return None, None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_category = entry.get("category")
+        if isinstance(raw_category, dict):
+            category = raw_category.get("category")
+        else:
+            category = raw_category
+        groups = entry.get("groups")
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            if str(group.get("id") or group.get("group_id") or "") == group_id:
+                return group, category if isinstance(category, str) else None
+    return None, None
+
+
+def _timer_group_instincts(group, status):
+    """Rebuild group-update instruct[] from current timers, applying status."""
+    timers = group.get("timers")
+    instruct = []
+    if isinstance(timers, list) and timers:
+        for timer in timers:
+            if not isinstance(timer, dict):
+                continue
+            instruct.append({
+                "time": str(timer.get("time") or ""),
+                "functions": [
+                    {"code": fn.get("code"), "value": fn.get("value")}
+                    for fn in timer.get("functions") or []
+                    if isinstance(fn, dict)
+                ],
+                "status": status,
+            })
+    if not instruct:
+        raw = group.get("instruct")
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                instruct.append({
+                    "time": str(item.get("time") or ""),
+                    "functions": [
+                        {"code": fn.get("code"), "value": fn.get("value")}
+                        for fn in item.get("functions") or []
+                        if isinstance(fn, dict)
+                    ],
+                    "status": status,
+                })
+    return instruct
+
+
+def _timer_group_status(group):
+    """Return the observed status values for every timer in a group."""
+    observed = []
+    timers = group.get("timers") if isinstance(group, dict) else None
+    if isinstance(timers, list):
+        for timer in timers:
+            if isinstance(timer, dict):
+                try:
+                    observed.append(int(timer.get("status", -1)))
+                except (TypeError, ValueError):
+                    observed.append(-1)
+    if not observed:
+        try:
+            observed = [int(group.get("status", -1))]
+        except (TypeError, ValueError):
+            observed = [-1]
+    return observed
+
+
 def handle_schedtoggle(request):
     target, error_reply = _schedule_target(request)
     if target is None or error_reply is not None:
@@ -1091,12 +1176,55 @@ def handle_schedtoggle(request):
         cloud = make_cloud()
     except Exception as exc:
         return {"ok": False, "error": "cloud request failed: " + type(exc).__name__}
-    url = "/v1.0/devices/%s/timers/categories/%s/groups/%s/status" % (
-        device_id, category, group_id
-    )
-    _, error = _cloud_reply(cloud, url, "PUT", {"status": 1 if enable else 0})
+    read_url = "/v1.0/devices/%s/timers/categories/%s" % (device_id, category)
+    result, error = _cloud_reply(cloud, read_url)
     if error is not None:
         return {"ok": False, "error": error}
+    group, _ = _find_timer_group(result, group_id)
+    if group is None:
+        # Category-scoped read may omit entries; fall back to the full list.
+        result, error = _cloud_reply(cloud, "/v1.0/devices/%s/timers" % device_id)
+        if error is not None:
+            return {"ok": False, "error": error}
+        group, _ = _find_timer_group(result, group_id)
+    if group is None:
+        return {"ok": False, "error": "schedule not found"}
+    status = 1 if enable else 0
+    offset, timezone_id = _system_timezone()
+    body = {
+        "category": category,
+        "loops": str(group.get("loops") or "1111111"),
+        "time_zone": offset,
+        "timezone_id": timezone_id,
+        "instruct": _timer_group_instincts(group, status),
+    }
+    alias_name = group.get("alias_name")
+    if isinstance(alias_name, str):
+        body["alias_name"] = alias_name
+    update_url = "/v1.0/devices/%s/timers/groups/%s" % (device_id, group_id)
+    _, error = _cloud_reply(cloud, update_url, "PUT", body)
+    if error is not None:
+        return {"ok": False, "error": error}
+    readback, error = _cloud_reply(cloud, read_url)
+    if error is not None:
+        return {"ok": False, "error": error}
+    current, _ = _find_timer_group(readback, group_id)
+    if current is not None and _timer_group_status(current) == [status]:
+        return {"ok": True}
+    # Some firmware silently ignores status:0 on the group-update path; the
+    # category status endpoint does disable. Try it, then verify again.
+    legacy_url = "/v1.0/devices/%s/timers/categories/%s/groups/%s/status" % (
+        device_id, category, group_id
+    )
+    _, error = _cloud_reply(cloud, legacy_url, "PUT", {"status": status})
+    if error is not None:
+        return {"ok": False, "error": error}
+    readback, error = _cloud_reply(cloud, read_url)
+    if error is not None:
+        return {"ok": False, "error": error}
+    current, _ = _find_timer_group(readback, group_id)
+    if current is None or _timer_group_status(current) != [status]:
+        return {"ok": False, "error": "toggle did not take effect"}
     return {"ok": True}
 
 
